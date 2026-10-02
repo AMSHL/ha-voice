@@ -1,0 +1,6 @@
+*.pem
+*.key
+*.crt
+data/
+*.wav
+*.log

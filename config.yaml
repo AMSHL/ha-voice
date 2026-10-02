@@ -1,0 +1,19 @@
+name: "Голос"
+slug: "voice"
+version: "0.1.0"
+description: "Голосовой ассистент на айфоне"
+arch:
+  - "amd64"
+init: false
+ingress: true
+ingress_port: 8099
+panel_icon: "mdi:microphone-message"
+panel_title: "Голос"
+ports:
+  8091/tcp: 8091
+ports_description:
+  8091/tcp: "HTTPS для айфона"
+options:
+  host_ip: "192.168.1.123"
+schema:
+  host_ip: "str"

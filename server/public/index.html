@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="ru"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<base href="{{BASE}}/">
+<title>Голос</title>
+<style>
+:root{--c:#FBF7EF;--l:#E4DACB;--t:#4A3A2C;--m:#8A7A68}
+*{box-sizing:border-box;-webkit-user-select:none;user-select:none;-webkit-touch-callout:none;-webkit-tap-highlight-color:transparent}
+html{min-height:100%;background:linear-gradient(165deg,#ECE7DF,#D8D0C3) fixed}
+body{margin:0;padding:16px;color:var(--t);font:16px/1.4 -apple-system,sans-serif}
+main{max-width:520px;margin:auto;display:grid;gap:14px}
+.card{background:var(--c);border:1px solid var(--l);border-radius:22px;padding:16px}
+.row{display:flex;gap:8px;align-items:center;justify-content:space-between}
+button{font:inherit;color:var(--t);border:1px solid var(--l);background:#fff9;border-radius:14px;padding:12px}
+#rooms button{flex:1}
+#rooms .on{background:var(--t);color:var(--c)}
+#status{font-size:20px;font-weight:600}
+.err{color:#A8432F}
+.meter{height:12px;border-radius:6px;background:#EDE5D8;margin:10px 0 6px}
+.meter i{display:block;height:100%;width:0;border-radius:6px;background:linear-gradient(90deg,#9DB07F,#D9A441,#C0583A)}
+.big{flex:1;height:160px;border-radius:26px;font-size:22px;font-weight:600;touch-action:none}
+.big small{display:block;font-size:13px;font-weight:400}
+#listen.on{background:#5F7A4E;color:#fff}
+#say{background:#B8643C;color:#fff}
+#say.down{transform:scale(.94);background:#8E4527;box-shadow:inset 0 0 0 6px #fff7}
+#say.out{background:#9B8B7A}
+#start{background:var(--t);color:var(--c);font-size:18px}
+dl{display:grid;grid-template-columns:auto 1fr;gap:4px 12px;font-size:14px}
+dt,.m{color:var(--m)}dd{margin:0;text-align:right}
+.m{font-size:13px}
+audio{width:100%}
+</style></head><body><main>
+<div class="row"><h2>Голос</h2><span class="m" id="ver"></span></div>
+<div class="card row" id="rooms"><button data-r="bedroom">Спальня</button><button data-r="living">Гостиная</button><button data-r="kids">Детская</button></div>
+<div class="card"><div id="status">Ожидание</div><div class="meter"><i id="lvl"></i></div>
+<div class="row m"><span>Микрофон: <b id="lvlMic">—</b></span><span>Сервер слышит: <b id="lvlSrv">—</b></span></div></div>
+<button id="start">Включить микрофон</button>
+<div class="row"><button class="big" id="listen">Слушать<small>выключено</small></button><button class="big" id="say">Сказать<small>держите и говорите</small></button></div>
+<div class="card"><div class="row"><b>Последняя запись</b><button id="play">Прослушать</button></div>
+<div class="m" id="recinfo">—</div><audio id="audio" controls hidden></audio></div>
+<div class="card"><b>Диагностика</b><dl>
+<dt>Защищённый контекст</dt><dd id="dSec"></dd><dt>Микрофон</dt><dd id="dMic">не включён</dd>
+<dt>Частота</dt><dd id="dRate">—</dd><dt>Сервер</dt><dd id="dNet">—</dd><dt>Задержка</dt><dd id="dRtt">—</dd>
+<dt>Экран</dt><dd id="dWake">—</dd></dl>
+<a class="m" href="cert.crt">Сертификат для айфона</a></div>
+</main><script type="module" src="app.js"></script></body></html>
