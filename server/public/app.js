@@ -1,4 +1,4 @@
-// Voice 2a: mic -> 16 kHz int16, 20 ms frames -> WebSocket; answer audio back -> Web Audio.
+// Voice 0.4: mic -> 16 kHz int16, 20 ms frames -> WebSocket; answer audio back -> Web Audio.
 // Mic is open only while "Сказать" is held or "Слушать" is on; AudioContext stays for playback.
 const $ = id => document.getElementById(id);
 const set = (id, t) => { $(id).textContent = t; };
@@ -9,8 +9,22 @@ let listening = false, ptt = null, ws = null, ok = false, retry = 1000;
 let pre = [], ctx = null, mute = null, wl = null, mic = null, micP = null, pong = 0, stT = 0, lvlT = 0, peak = -100;
 
 function status(t, err) { $('status').textContent = t; $('status').className = err ? 'err' : ''; }
-function idle() { status(ptt ? (ptt.live ? 'Говорите…' : 'Готовлюсь…') : listening ? 'Слушаю' : 'Ожидание'); }
-function flash(t, err) { status(t, err); clearTimeout(stT); stT = setTimeout(idle, err ? 4000 : 2000); }
+// 0.4 «Слушать»: the server reports lstate wake -> cmd (wake word heard) -> busy -> wake again.
+const LS = { wake: 'Жду «Hey Jarvis»', cmd: 'Слушаю команду…', busy: 'Думаю…', nosat: 'Жду, пока HA подключит спутник' };
+let lst = '', hint = false, flT = 0;
+function idle() {
+  status(ptt ? (ptt.live ? 'Говорите…' : 'Готовлюсь…') : listening ? LS[lst] || 'Включаю…'
+    : hint ? 'Слушать выключено, нажмите, чтобы включить' : 'Ожидание');
+  $('status').parentNode.classList.toggle('hot', listening && lst === 'cmd');
+}
+function flash(t, err) { status(t, err); clearTimeout(stT); flT = performance.now() + (err ? 4000 : 2000); stT = setTimeout(idle, err ? 4000 : 2000); }
+function beep() { // short tone made in Web Audio, no file
+  if (!ctx || ctx.state !== 'running') return;
+  const o = ctx.createOscillator(), g = ctx.createGain(), t = ctx.currentTime;
+  o.frequency.value = 880; g.gain.setValueAtTime(0.0001, t);
+  g.gain.exponentialRampToValueAtTime(0.3, t + 0.02); g.gain.exponentialRampToValueAtTime(0.0001, t + 0.18);
+  o.connect(g).connect(ctx.destination); o.start(t); o.stop(t + 0.2);
+}
 const sendJ = o => ok && ws.send(JSON.stringify(o));
 const sendB = b => ok && ws.send(b);
 const mode = () => ({ type: 'mode', room, mode: listening ? 'listen' : 'idle' });
@@ -64,7 +78,7 @@ function ttsDone() {
   let o = 0;
   for (const b of chunks) { const a = new Int16Array(b, 0, b.byteLength >> 1); pcm.set(a, o); o += a.length; }
   chunks = [];
-  if (!fmt || fmt.width !== 2 || !len) return idle();
+  if (!fmt || fmt.width !== 2 || !len) { sendJ({ type: 'played' }); return idle(); }
   const ch = fmt.channels || 1;
   last = { pcm, ch, rate: fmt.rate, sec: len / ch / fmt.rate, played: false };
   dLast(); play();
@@ -73,7 +87,7 @@ function play() { // also called from the "tap to hear" button, inside its gestu
   const L = last;
   if (!L || L.played) return;
   sess(mic ? 'play-and-record' : 'playback');
-  const ask = () => { tapUi(true); clearTimeout(stT); status('Нажмите, чтобы услышать ответ'); };
+  const ask = () => { sendJ({ type: 'played' }); tapUi(true); clearTimeout(stT); status('Нажмите, чтобы услышать ответ'); };
   if (!ctx) return ask();
   const go = () => {
     dCtx();
@@ -82,7 +96,7 @@ function play() { // also called from the "tap to hear" button, inside its gestu
     const n = Math.floor(L.pcm.length / L.ch), b = ctx.createBuffer(L.ch, n, L.rate);
     for (let c = 0; c < L.ch; c++) { const d = b.getChannelData(c); for (let i = 0; i < n; i++) d[i] = L.pcm[i * L.ch + c] / 32768; }
     const s = ctx.createBufferSource(); s.buffer = b; s.connect(ctx.destination);
-    s.onended = idle; s.start();
+    s.onended = () => { sendJ({ type: 'played' }); if (listening) lst = 'wake'; idle(); }; s.start();
     L.played = true; tapUi(false); dLast(); clearTimeout(stT); status('Отвечаю…');
   };
   if (ctx.state === 'running') return go();
@@ -92,11 +106,17 @@ function play() { // also called from the "tap to hear" button, inside its gestu
 function onMsg(m) {
   if (m.type[0] === 'v' || m.type === 'who') return vMsg(m);
   if (m.type === 'nosat') flash('Home Assistant не подключён к спутнику ' + m.room, 1);
-  if (m.type === 'sent') { clearTimeout(stT); status('Распознаю…'); stT = setTimeout(idle, 15000); set('heard', '…'); set('answer', '…'); tapUi(false); fmt = null; chunks = []; }
+  if (m.type === 'sent') { clearTimeout(stT); status('Думаю…'); stT = setTimeout(idle, 15000); set('heard', '…'); set('answer', '…'); tapUi(false); fmt = null; chunks = []; }
   if (m.type === 'heard') set('heard', m.text || '(ничего не распознано)');
   if (m.type === 'answer') set('answer', m.text || '—');
   if (m.type === 'tts') { fmt = m; chunks = []; clearTimeout(stT); status('Отвечаю…'); stT = setTimeout(idle, 15000); }
   if (m.type === 'ttsend') ttsDone();
+  if (m.type === 'lstate' && listening) {
+    lst = m.s === 'none' ? 'wake' : m.s;
+    if (m.s === 'cmd') beep();
+    if (m.s === 'none') flash('Не расслышал команду');
+    else if (m.s !== 'wake' || performance.now() > flT) { clearTimeout(stT); idle(); }
+  }
   if (m.type === 'perr') { flash('Ошибка: ' + m.text, 1); set('answer', 'Ошибка: ' + m.text); }
   if (m.type === 'hello') set('ver', 'v' + m.version);
   if (m.type === 'pong') { pong = performance.now(); set('dRtt', Math.round(pong - m.t) + ' мс'); set('dSat', m.sat ? 'подключён' : 'не подключён'); }
@@ -182,9 +202,9 @@ function onFrame(buf) {
 
 const listen = $('listen'), say = $('say');
 function setListen(on) {
-  listening = on;
+  listening = on; lst = ''; if (on) hint = false;
   listen.classList.toggle('on', on);
-  listen.lastChild.textContent = on ? (mic ? 'поток идёт' : 'включаю…') : 'выключено';
+  listen.lastChild.textContent = on ? (mic ? 'поток идёт' : 'включаю…') : hint ? 'нажмите, чтобы включить' : 'выключено';
   sendJ(mode()); idle();
   if (!on && !ptt) closeMic();
 }
@@ -252,7 +272,7 @@ async function wake() {
 }
 function away() { // left the page: cancel the press and close the mic
   if (ptt) release(ptt.id, true);
-  if (listening) setListen(false);
+  if (listening) { hint = true; setListen(false); }
   closeMic();
 }
 document.onvisibilitychange = () => {
@@ -321,3 +341,5 @@ document.addEventListener('pointerdown', ensureCtx, true);
 document.addEventListener('click', ensureCtx, true);
 $('tapPlay').onclick = () => { ensureCtx(); play(); };
 sess('playback'); dCtx();
+// 0.4: after the tab was hidden «Слушать» is off; the hint in the status turns it back on with a tap.
+$('status').onclick = () => { if (hint && !listening) listen.onclick(); };

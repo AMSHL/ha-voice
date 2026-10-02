@@ -1,11 +1,11 @@
-# Voice 2a: aiohttp on 8099 (ingress) and 8091 (https); Wyoming satellites 10700-10702.
+# Voice 0.4: aiohttp on 8099 (ingress) and 8091 (https); Wyoming satellites 10700-10702.
 import array, asyncio, json, math, os, ssl, time, wave
 from aiohttp import WSMsgType, web
 from wyoming.event import Event, async_read_event, async_write_event
 from wyoming.info import Attribution, Info, Satellite
 import spk
 
-VERSION = "0.3.3"
+VERSION = "0.4.0"
 PUB = os.path.dirname(os.path.abspath(__file__)) + "/public/"
 REC, TLS = "/data/recordings/", "/data/tls/"
 ROOMS = {"bedroom": ("Спальня", 10700), "living": ("Гостиная", 10701), "kids": ("Детская", 10702)}
@@ -19,7 +19,7 @@ class Sat:
 
     def __init__(self, room):
         self.room, (self.name, self.port) = room, ROOMS[room]
-        self.ha = self.ws = None
+        self.ha = self.ws = self.lis = None  # lis: Listen of the page with «Слушать» on
 
     def info(self):
         return Info(satellite=Satellite(
@@ -85,11 +85,155 @@ class Sat:
         elif t == "audio-stop":
             await self.to_page({"type": "ttsend"})
             await async_write_event(Event("played", {}), w)
+        elif t == "detection" and self.lis:
+            await self.lis.detected()
         elif t == "error":
+            if self.lis:
+                self.lis.err()
             await self.to_page({"type": "perr", "text": d.get("text") or d.get("code") or "?"})
 
 
 SATS = {r: Sat(r) for r in ROOMS}
+
+
+class Listen:
+    """«Слушать»: HA hears the wake word (pipeline wake -> wake). After detection the command is cut here
+    by own VAD, then who -> helpers -> asr pipeline like push-to-talk, so the helpers are set first."""
+    PRE, TAIL, MAXC, NOVOICE, VOICED = 15, 0.8, 8.0, 4.0, 0.3
+
+    def __init__(self, ws):
+        self.ws, self.room, self.sat, self.ha, self.st, self.t, self.ans = ws, None, None, None, "off", 0.0, False
+        self.ring, self.buf, self.noise, self.voiced, self.quiet, self.ts = [], bytearray(), -60.0, 0.0, 0.0, 0
+
+    async def tell(self, s):
+        try:
+            await self.ws.send_str(json.dumps({"type": "lstate", "s": s}))
+        except Exception:
+            pass
+
+    def later(self, sec):  # st "busy": nothing goes to HA; tick() restarts the wake stream after sec
+        self.st, self.t = "busy", time.monotonic() + sec
+
+    async def set(self, on, room):
+        if on and self.st != "off" and room == self.room:
+            return
+        await self.stop()
+        if on:
+            self.room, self.sat = room, SATS[room]
+            self.sat.lis = self
+            await self.wake()
+
+    async def wake(self):
+        sat, self.ans = self.sat, False
+        if sat.ha is None:
+            self.later(3)
+            return await self.tell("nosat")
+        self.ring, self.ts, self.ha = [], 0, sat.ha
+        try:
+            await sat.to_ha("run-pipeline", {"start_stage": "wake", "end_stage": "wake", "restart_on_end": False})
+            await sat.to_ha("audio-start", {**FMT, "timestamp": 0})
+        except Exception as e:
+            print("[voice] wake start failed:", e)
+            return self.later(3)
+        self.st = "wake"
+        await self.tell("wake")
+
+    async def hold(self, sec=60):  # push-to-talk or a command is running: stop the wake stream
+        if self.st == "wake" and self.ha is not None and self.ha is self.sat.ha:
+            try:
+                await self.sat.to_ha("audio-stop", {"timestamp": self.ts})
+            except Exception:
+                pass
+        if self.st != "off":
+            self.later(sec)
+        self.ans = False
+
+    async def stop(self):
+        await self.hold()
+        if self.sat is not None and self.sat.lis is self:
+            self.sat.lis = None
+        self.st = "off"
+
+    async def done(self):  # answer played, or nothing to wait for: back to the wake word
+        if self.st == "busy":
+            await self.wake()
+
+    def err(self):  # errors of a wake stream we stopped ourselves are ignored
+        if self.st == "wake" or (self.st == "busy" and self.ans):
+            self.later(2)
+
+    async def tick(self):  # on every page ping (2 s)
+        if self.st == "busy" and time.monotonic() > self.t:
+            await self.wake()
+        elif self.st == "wake" and self.ha is not self.sat.ha:
+            await self.wake()
+
+    async def detected(self):
+        if self.st != "wake":
+            return
+        # The wake pipeline ends by itself (end_stage wake); 0.3 s before detection is kept as pre-roll.
+        self.st, self.buf, self.voiced, self.quiet = "cmd", bytearray(b"".join(self.ring)), 0.0, 0.0
+        print("[voice] wake word", self.sat.name)
+        await self.tell("cmd")
+
+    async def frame(self, data):
+        if self.st not in ("wake", "cmd"):
+            return
+        a = array.array("h", data)
+        db, dur = 10 * math.log10(sum(x * x for x in a) / max(len(a), 1) / 2 ** 30 + 1e-10), len(a) / RATE
+        if self.st == "wake":
+            self.noise += (db - self.noise) * (0.1 if db < self.noise else 0.005)
+            self.ring = (self.ring + [data])[-self.PRE:]
+            try:
+                await self.sat.to_ha("audio-chunk", {**FMT, "timestamp": self.ts}, data)
+            except Exception:
+                return self.later(2)
+            self.ts += round(dur * 1000)
+            return
+        self.buf.extend(data)
+        if db > max(self.noise + 10, -55):
+            self.voiced, self.quiet = self.voiced + dur, 0.0
+        else:
+            self.quiet += dur
+        sec = len(self.buf) / 2 / RATE
+        if (self.voiced >= self.VOICED and self.quiet >= self.TAIL) or sec >= self.MAXC or (
+                self.voiced < self.VOICED and sec >= self.NOVOICE):
+            await self.finish()
+
+    async def finish(self):
+        pcm, voiced = bytes(self.buf), self.voiced
+        self.buf = bytearray()
+        await self.hold()
+        print("[voice] command", self.sat.name, round(len(pcm) / 2 / RATE, 2), "voiced", round(voiced, 2))
+        if voiced < self.VOICED:
+            await self.tell("none")
+            return await self.wake()
+        await self.tell("busy")
+        self.ans = await command(self.ws, self.room, pcm)
+        if not self.ans:
+            self.later(2)
+
+
+async def command(ws, room, pcm):
+    """Phrase -> saved, who -> helpers, then the asr pipeline (push-to-talk and «Слушать»). True if sent."""
+    send = lambda o: ws.send_str(json.dumps(o))
+    sec = round(len(pcm) / 2 / RATE, 2)
+    name = await asyncio.get_running_loop().run_in_executor(None, save, room, pcm)
+    print("[voice] saved", name, sec)
+    await send({"type": "saved", "name": name, "sec": sec})
+    sat = SATS[room]
+    await send(await spk.before(sat.name, pcm))
+    if sat.ha is None:
+        await send({"type": "nosat", "room": sat.name})
+        return False
+    try:
+        await sat.run(ws, pcm)
+        await send({"type": "sent"})
+        return True
+    except Exception as e:
+        print("[voice] send to HA failed:", e)
+        await send({"type": "perr", "text": "не удалось отправить в Home Assistant: %s" % e})
+        return False
 
 
 async def index(req):
@@ -148,16 +292,18 @@ async def api_last(req):
 async def ws_handler(req):
     ws = web.WebSocketResponse(heartbeat=15, max_msg_size=1 << 20)
     await ws.prepare(req)
+    lis = Listen(ws)
     try:
-        await ws_loop(ws)
+        await ws_loop(ws, lis)
     finally:
+        await lis.stop()
         for s in SATS.values():
             if s.ws is ws:
                 s.ws = None
     return ws
 
 
-async def ws_loop(ws):
+async def ws_loop(ws, lis):
     room, ptt, sq, n, last = "bedroom", None, 0.0, 0, time.monotonic()
     send = lambda o: ws.send_str(json.dumps(o))
     async for m in ws:
@@ -170,6 +316,7 @@ async def ws_loop(ws):
             if n and time.monotonic() - last >= 0.2:
                 await send({"type": "level", "db": round(20 * math.log10(max(math.sqrt(sq / n), 1) / 32768), 1)})
                 sq, n, last = 0.0, 0, time.monotonic()
+            await lis.frame(m.data)
         if m.type != WSMsgType.TEXT:
             continue
         try:
@@ -179,39 +326,34 @@ async def ws_loop(ws):
         t = d.get("type")
         if d.get("room") in ROOMS:
             room = d["room"]
+        if t in ("hello", "mode"):
+            await lis.set(d.get("mode") == "listen", room)
         if t == "hello":
             await send({"type": "hello", "version": VERSION})
         elif t == "ping":
             await send({"type": "pong", "t": d.get("t"), "sat": SATS[room].ha is not None})
+            await lis.tick()
+        elif t == "played":
+            await lis.done()
         elif t == "start":
+            await lis.hold()
             ptt, vm = bytearray(), d
         elif t in ("vstat", "vdel", "vdelall"):
             await send(await spk.manage(t, d.get("p")))
         elif t == "cancel":
             ptt = None
+            await lis.done()
         elif t == "end" and ptt is not None:
             pcm, ptt = bytes(ptt), None
             sec = round(len(pcm) / 2 / RATE, 2)
             if sec < MIN_SEC:
                 await send({"type": "short", "sec": sec})
-                continue
-            if vm.get("v") in ("rec", "check"):
+            elif vm.get("v") in ("rec", "check"):
                 await send(await spk.voice_cmd(vm["v"], vm.get("p"), pcm))
+            elif await command(ws, room, pcm):
+                lis.ans = lis.st == "busy"
                 continue
-            name = await asyncio.get_running_loop().run_in_executor(None, save, room, pcm)
-            print("[voice] saved", name, sec)
-            await send({"type": "saved", "name": name, "sec": sec})
-            sat = SATS[room]
-            await send(await spk.before(sat.name, pcm))
-            if sat.ha is None:
-                await send({"type": "nosat", "room": sat.name})
-                continue
-            try:
-                await sat.run(ws, pcm)
-                await send({"type": "sent"})
-            except Exception as e:
-                print("[voice] send to HA failed:", e)
-                await send({"type": "perr", "text": "не удалось отправить в Home Assistant: %s" % e})
+            await lis.done()
 
 
 async def main():

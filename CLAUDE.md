@@ -2,7 +2,7 @@
 
 Аддон `voice` (`/addons/voice`): голосовой ассистент на старом айфоне.
 Этапы 0–2a — страница, приём звука, спутник Wyoming (рация -> Assist -> ответ голосом);
-3 (0.3.x) — кто говорит; режим «Слушать» и слово активации — 2b; музыка — дальше.
+3 (0.3.x) — кто говорит; 2b (0.4.0) — «Слушать» со словом «Hey Jarvis»; музыка — дальше.
 
 - `server/server.py` — aiohttp: 8099 ingress, 8091 https (`/data/tls`, CN = `host_ip`).
   `ws`, `cert.crt`, `api/health`, `api/recordings`, `api/recordings/last.wav`,
@@ -16,18 +16,31 @@
 - Перед `run-pipeline`: опознание (≤1.5 с, иначе «Неизвестно», 0 %) -> Supervisor API
   `input_select.kto_govorit`, `input_number.kto_govorit_uverennost` -> ждём HA -> конвейер.
 - `server/public/`: `index.html` (`{{BASE}}`, вкладки «Команды»/«Голоса»), `app.js`, `worklet.js`.
-- WS: JSON `hello|mode|room`, `start|end|cancel` (`start` с `v: rec|check`, `p: <id>` —
+- WS: JSON `hello|mode|room`, `played`, `start|end|cancel` (`start` с `v: rec|check`, `p: <id>` —
   образец или проверка вместо HA), `vstat|vdel|vdelall`, `ping`; бинарь — int16 16 кГц
   моно, 320 отсчётов. Ответы: `level`, `saved`, `short`, `pong` (+`sat`), `nosat`, `who`,
-  `vstat`, `vshort`, `vcheck`, `verr`, `sent`, `heard`, `answer`, `tts` + бинарь int16, `ttsend`, `perr`.
+  `vstat`, `vshort`, `vcheck`, `verr`, `sent`, `heard`, `answer`, `tts` + бинарь int16, `ttsend`, `perr`,
+  `lstate` (`s`: wake|cmd|busy|none|nosat).
 - Микрофон открыт, только пока держат «Сказать» или включено «Слушать».
 - Wyoming (`class Sat`): 10700 Спальня, 10701 Гостиная, 10702 Детская.
+
+## «Слушать» (0.4.0, `class Listen`)
+- Слово ловит HA: в конвейере «Клод» `wake_word.openwakeword`, `hey_jarvis` (аддон openWakeWord).
+- Спутник шлёт `run-pipeline` wake -> **wake** и поток кадров. На `detection` HA сам заканчивает
+  конвейер; команда режется здесь своим VAD (тишина 0.8 с после ≥0.3 с речи, максимум 8 с, нет
+  речи 4 с -> `none`), с 0.3 с до detection. Дальше `command()` — тот же путь, что у рации:
+  запись, опознание -> хелперы, затем `run-pipeline` asr -> tts. Так хелперы точно раньше агента.
+- Пока ждём ответ, в HA ничего не идёт (`busy`). Страница шлёт `played` после проигрывания
+  (или если играть нечего) -> снова wake. Запас: ошибка HA -> 2 с, тишина -> 60 с (`tick` на ping).
+- «Сказать» при «Слушать»: `hold()` закрывает поток wake (`audio-stop`), после ответа — снова wake.
+  Ошибки от закрытого нами потока игнорируются (`ans`).
+- Вкладка в фоне или экран заблокирован -> «Слушать» выключается, в статусе подсказка, тап по ней включает.
 
 ## Правила
 - Как в books: строки `config.yaml` в кавычках; `apply.sh` не качает; BusyBox —
   `grep -F -e`, сверки на python3; версию поднимать при правке сервера.
 - Конфиг HA не трогать. Мост здесь не коммитит — коммит делает `apply.sh`.
-- git: `main`, origin `AMSHL/ha-voice`, ключ `/config/.ssh/ha_voice_deploy`.
+- git: `main`, origin `AMSHL/ha-voice`, ключ `/config/.ssh/ha_voice_deploy`; apply.sh делает push.
 
 ## Урок: сборка 0.3.0
 - 0.3.0 не собрался («unknown error while trying to build the image»): `spk.sha256`
