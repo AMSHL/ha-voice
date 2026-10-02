@@ -1,6 +1,6 @@
 name: "Голос"
 slug: "voice"
-version: "0.1.0"
+version: "0.2.0"
 description: "Голосовой ассистент на айфоне"
 arch:
   - "amd64"
@@ -11,8 +11,14 @@ panel_icon: "mdi:microphone-message"
 panel_title: "Голос"
 ports:
   8091/tcp: 8091
+  10700/tcp: 10700
+  10701/tcp: 10701
+  10702/tcp: 10702
 ports_description:
   8091/tcp: "HTTPS для айфона"
+  10700/tcp: "Wyoming-спутник: Спальня"
+  10701/tcp: "Wyoming-спутник: Гостиная"
+  10702/tcp: "Wyoming-спутник: Детская"
 options:
   host_ip: "192.168.1.123"
 schema:

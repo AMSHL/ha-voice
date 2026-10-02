@@ -1,13 +1,94 @@
-# Voice 0-1: aiohttp on 8099 (ingress) and 8091 (https).
+# Voice 2a: aiohttp on 8099 (ingress) and 8091 (https); Wyoming satellites 10700-10702.
 import array, asyncio, json, math, os, ssl, time, wave
 from aiohttp import WSMsgType, web
+from wyoming.event import Event, async_read_event, async_write_event
+from wyoming.info import Attribution, Info, Satellite
 
-VERSION = "0.1.0"
+VERSION = "0.2.0"
 PUB = os.path.dirname(os.path.abspath(__file__)) + "/public/"
 REC, TLS = "/data/recordings/", "/data/tls/"
-ROOMS = {"bedroom", "living", "kids"}
+ROOMS = {"bedroom": ("Спальня", 10700), "living": ("Гостиная", 10701), "kids": ("Детская", 10702)}
 RATE, KEEP, MAX_SEC, MIN_SEC = 16000, 20, 60, 0.4
+FMT, CHUNK = {"rate": RATE, "width": 2, "channels": 1}, 2048  # 1024 samples per chunk
 NC = {"Cache-Control": "no-store"}
+
+
+class Sat:
+    """Wyoming satellite of one room: ha = HA connection after run-satellite, ws = page awaiting the answer."""
+
+    def __init__(self, room):
+        self.room, (self.name, self.port) = room, ROOMS[room]
+        self.ha = self.ws = None
+
+    def info(self):
+        return Info(satellite=Satellite(
+            name="Голос: " + self.name, area=self.name, installed=True, version=VERSION,
+            description="Айфон, " + self.name, attribution=Attribution(name="Home Voice", url=""))).event()
+
+    async def to_ha(self, typ, data=None, payload=None):
+        await async_write_event(Event(typ, data or {}, payload), self.ha)
+
+    async def to_page(self, o):
+        ws = self.ws
+        if ws is None or ws.closed:
+            return
+        try:
+            await (ws.send_bytes(o) if isinstance(o, bytes) else ws.send_str(json.dumps(o)))
+        except Exception:
+            pass
+
+    async def run(self, ws, pcm):
+        # Push-to-talk: the whole phrase (with 0.3 s pre-roll from the page) goes to an asr -> tts pipeline.
+        self.ws = ws
+        print("[voice] -> HA", self.name, "run-pipeline", round(len(pcm) / 2 / RATE, 2))
+        await self.to_ha("run-pipeline", {"start_stage": "asr", "end_stage": "tts", "restart_on_end": False})
+        await asyncio.sleep(0.3)  # let HA start the pipeline before audio arrives
+        await self.to_ha("audio-start", {**FMT, "timestamp": 0})
+        for i in range(0, len(pcm), CHUNK):
+            await self.to_ha("audio-chunk", {**FMT, "timestamp": i // 32}, pcm[i:i + CHUNK])
+        await self.to_ha("audio-stop", {"timestamp": len(pcm) // 32})
+
+    async def serve(self, reader, writer):
+        print("[voice] HA connected to", self.name, writer.get_extra_info("peername"))
+        try:
+            while (ev := await async_read_event(reader)) is not None:
+                await self.on_event(ev, writer)
+        except Exception as e:
+            print("[voice]", self.name, "connection error:", e)
+        finally:
+            if self.ha is writer:
+                self.ha = None
+            print("[voice] HA disconnected from", self.name)
+            writer.close()
+
+    async def on_event(self, ev, w):
+        t, d = ev.type, ev.data or {}
+        if t != "audio-chunk":
+            print("[voice] <- HA", self.name, t, json.dumps(d, ensure_ascii=False)[:200])
+        if t == "describe":
+            await async_write_event(self.info(), w)
+        elif t == "ping":
+            await async_write_event(Event("pong", {"text": d.get("text")}), w)
+        elif t == "run-satellite":
+            self.ha = w
+        elif t == "pause-satellite" and self.ha is w:
+            self.ha = None
+        elif t == "transcript":
+            await self.to_page({"type": "heard", "text": d.get("text") or ""})
+        elif t in ("synthesize", "handled", "not-handled"):
+            await self.to_page({"type": "answer", "text": d.get("text") or ""})
+        elif t == "audio-start":
+            await self.to_page({"type": "tts", **{k: d.get(k, v) for k, v in FMT.items()}})
+        elif t == "audio-chunk" and ev.payload:
+            await self.to_page(ev.payload)
+        elif t == "audio-stop":
+            await self.to_page({"type": "ttsend"})
+            await async_write_event(Event("played", {}), w)
+        elif t == "error":
+            await self.to_page({"type": "perr", "text": d.get("text") or d.get("code") or "?"})
+
+
+SATS = {r: Sat(r) for r in ROOMS}
 
 
 async def index(req):
@@ -47,7 +128,8 @@ def save(room, pcm):
 
 
 async def api_health(req):
-    return web.json_response({"ok": True, "version": VERSION, "recordings": len(recs())})
+    return web.json_response({"ok": True, "version": VERSION, "recordings": len(recs()),
+                              "satellites": {r: s.ha is not None for r, s in SATS.items()}})
 
 
 async def api_recs(req):
@@ -65,6 +147,16 @@ async def api_last(req):
 async def ws_handler(req):
     ws = web.WebSocketResponse(heartbeat=15, max_msg_size=1 << 20)
     await ws.prepare(req)
+    try:
+        await ws_loop(ws)
+    finally:
+        for s in SATS.values():
+            if s.ws is ws:
+                s.ws = None
+    return ws
+
+
+async def ws_loop(ws):
     room, ptt, sq, n, last = "bedroom", None, 0.0, 0, time.monotonic()
     send = lambda o: ws.send_str(json.dumps(o))
     async for m in ws:
@@ -89,7 +181,7 @@ async def ws_handler(req):
         if t == "hello":
             await send({"type": "hello", "version": VERSION})
         elif t == "ping":
-            await send({"type": "pong", "t": d.get("t")})
+            await send({"type": "pong", "t": d.get("t"), "sat": SATS[room].ha is not None})
         elif t == "start":
             ptt = bytearray()
         elif t == "cancel":
@@ -103,7 +195,16 @@ async def ws_handler(req):
             name = await asyncio.get_running_loop().run_in_executor(None, save, room, pcm)
             print("[voice] saved", name, sec)
             await send({"type": "saved", "name": name, "sec": sec})
-    return ws
+            sat = SATS[room]
+            if sat.ha is None:
+                await send({"type": "nosat", "room": sat.name})
+                continue
+            try:
+                await sat.run(ws, pcm)
+                await send({"type": "sent"})
+            except Exception as e:
+                print("[voice] send to HA failed:", e)
+                await send({"type": "perr", "text": "не удалось отправить в Home Assistant: %s" % e})
 
 
 async def main():
@@ -118,7 +219,9 @@ async def main():
     ctx = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
     ctx.load_cert_chain(TLS + "cert.pem", TLS + "key.pem")
     await web.TCPSite(runner, "0.0.0.0", 8091, ssl_context=ctx).start()
-    print("[voice] v" + VERSION, "ingress 8099, https 8091")
+    for s in SATS.values():
+        await asyncio.start_server(s.serve, "0.0.0.0", s.port)
+    print("[voice] v" + VERSION, "ingress 8099, https 8091, wyoming 10700-10702")
     await asyncio.Event().wait()
 
 
