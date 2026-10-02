@@ -44,12 +44,12 @@ audio{width:100%}
 <div class="row m"><span>Микрофон: <b id="lvlMic">выключен</b></span><span>Сервер слышит: <b id="lvlSrv">—</b></span></div></div>
 <div class="row"><button class="big" id="listen">Слушать<small>выключено</small></button><button class="big" id="say">Сказать<small>держите и говорите</small></button></div>
 <div class="card vox"><div class="m">Держите «Сказать» и прочитайте</div><div id="phrase">—</div><div class="m" id="vcnt">—</div><div class="m" id="vres"></div><div class="row" style="margin-top:8px"><button id="vplay">Прослушать</button><button id="vdel">Удалить последний</button><button id="vdelall">Удалить все</button></div><audio id="vaudio" hidden></audio></div>
-<div class="card cmd"><div class="m">Говорит</div><div id="who">—</div><div class="m">Вы сказали</div><div id="heard">—</div><div class="m">Ответ</div><div id="answer">—</div></div>
+<div class="card cmd"><div class="m">Говорит</div><div id="who">—</div><div class="m">Вы сказали</div><div id="heard">—</div><div class="m">Ответ</div><div id="answer">—</div><button id="tapPlay" hidden>Нажмите, чтобы услышать ответ</button></div>
 <div class="card cmd"><div class="row"><b>Последняя запись</b><button id="play">Прослушать</button></div>
 <div class="m" id="recinfo">—</div><audio id="audio" controls hidden></audio></div>
 <div class="card"><b>Диагностика</b><dl>
 <dt>Защищённый контекст</dt><dd id="dSec"></dd><dt>Микрофон</dt><dd id="dMic">выключен</dd>
 <dt>Частота</dt><dd id="dRate">—</dd><dt>Сервер</dt><dd id="dNet">—</dd><dt>Задержка</dt><dd id="dRtt">—</dd><dt>Спутник HA</dt><dd id="dSat">—</dd>
-<dt>Экран</dt><dd id="dWake">—</dd></dl>
+<dt>Экран</dt><dd id="dWake">—</dd><dt>Звук</dt><dd id="dCtx">—</dd><dt>Audio Session</dt><dd id="dAs">—</dd><dt>Последний ответ</dt><dd id="dLast">—</dd></dl>
 <a class="m" href="cert.crt">Сертификат для айфона</a></div>
 </main><script type="module" src="app.js"></script></body></html>

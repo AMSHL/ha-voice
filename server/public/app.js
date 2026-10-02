@@ -47,24 +47,56 @@ setInterval(() => {
   if (performance.now() - pong > 7000) return drop();
   sendJ({ type: 'ping', t: performance.now() });
 }, 2000);
-let fmt = null, playT = 0;
-function tts(buf) { // int16 chunk of the answer, format from the last 'tts' message
-  if (!ctx || !fmt || fmt.width !== 2) return;
-  const ch = fmt.channels || 1, a = new Int16Array(buf, 0, buf.byteLength >> 1), n = Math.floor(a.length / ch);
-  if (!n) return;
-  const b = ctx.createBuffer(ch, n, fmt.rate);
-  for (let c = 0; c < ch; c++) { const d = b.getChannelData(c); for (let i = 0; i < n; i++) d[i] = a[i * ch + c] / 32768; }
-  const s = ctx.createBufferSource(); s.buffer = b; s.connect(ctx.destination);
-  playT = Math.max(playT, ctx.currentTime + 0.1); s.start(playT); playT += b.duration;
+// 0.3.3: the answer is collected whole and played at 'ttsend' with the rate from 'tts' (HA sends 22050).
+// iOS: navigator.audioSession 'playback' ignores the silent switch; 'play-and-record' only while the mic is open.
+let fmt = null, chunks = [], last = null;
+function sess(t) {
+  const a = navigator.audioSession;
+  if (a && t) try { a.type = t; } catch (_) {}
+  set('dAs', a ? a.type : 'нет API');
+}
+function dCtx() { set('dCtx', ctx ? 'AudioContext ' + ctx.state : 'ещё не было касания'); }
+function dLast() { if (last) set('dLast', last.sec.toFixed(1) + ' с, проигран ' + (last.played ? 'да' : 'нет')); }
+function tapUi(on) { $('tapPlay').hidden = !on; }
+function tts(buf) { if (fmt) chunks.push(buf); } // int16 chunk of the answer, format from the last 'tts' message
+function ttsDone() {
+  const len = chunks.reduce((n, b) => n + (b.byteLength >> 1), 0), pcm = new Int16Array(len);
+  let o = 0;
+  for (const b of chunks) { const a = new Int16Array(b, 0, b.byteLength >> 1); pcm.set(a, o); o += a.length; }
+  chunks = [];
+  if (!fmt || fmt.width !== 2 || !len) return idle();
+  const ch = fmt.channels || 1;
+  last = { pcm, ch, rate: fmt.rate, sec: len / ch / fmt.rate, played: false };
+  dLast(); play();
+}
+function play() { // also called from the "tap to hear" button, inside its gesture
+  const L = last;
+  if (!L || L.played) return;
+  sess(mic ? 'play-and-record' : 'playback');
+  const ask = () => { tapUi(true); clearTimeout(stT); status('Нажмите, чтобы услышать ответ'); };
+  if (!ctx) return ask();
+  const go = () => {
+    dCtx();
+    if (L !== last || L.played) return;
+    if (ctx.state !== 'running') return ask();
+    const n = Math.floor(L.pcm.length / L.ch), b = ctx.createBuffer(L.ch, n, L.rate);
+    for (let c = 0; c < L.ch; c++) { const d = b.getChannelData(c); for (let i = 0; i < n; i++) d[i] = L.pcm[i * L.ch + c] / 32768; }
+    const s = ctx.createBufferSource(); s.buffer = b; s.connect(ctx.destination);
+    s.onended = idle; s.start();
+    L.played = true; tapUi(false); dLast(); clearTimeout(stT); status('Отвечаю…');
+  };
+  if (ctx.state === 'running') return go();
+  // Outside a gesture iOS may leave resume() pending forever, so wait at most 0.6 s.
+  Promise.race([ctx.resume(), new Promise(r => setTimeout(r, 600))]).then(go, go);
 }
 function onMsg(m) {
   if (m.type[0] === 'v' || m.type === 'who') return vMsg(m);
   if (m.type === 'nosat') flash('Home Assistant не подключён к спутнику ' + m.room, 1);
-  if (m.type === 'sent') { clearTimeout(stT); status('Распознаю…'); stT = setTimeout(idle, 15000); set('heard', '…'); set('answer', '…'); }
+  if (m.type === 'sent') { clearTimeout(stT); status('Распознаю…'); stT = setTimeout(idle, 15000); set('heard', '…'); set('answer', '…'); tapUi(false); fmt = null; chunks = []; }
   if (m.type === 'heard') set('heard', m.text || '(ничего не распознано)');
   if (m.type === 'answer') set('answer', m.text || '—');
-  if (m.type === 'tts') { fmt = m; clearTimeout(stT); status('Отвечаю…'); stT = setTimeout(idle, 15000); }
-  if (m.type === 'ttsend') { clearTimeout(stT); stT = setTimeout(idle, Math.max(0, playT - (ctx ? ctx.currentTime : 0)) * 1000); }
+  if (m.type === 'tts') { fmt = m; chunks = []; clearTimeout(stT); status('Отвечаю…'); stT = setTimeout(idle, 15000); }
+  if (m.type === 'ttsend') ttsDone();
   if (m.type === 'perr') { flash('Ошибка: ' + m.text, 1); set('answer', 'Ошибка: ' + m.text); }
   if (m.type === 'hello') set('ver', 'v' + m.version);
   if (m.type === 'pong') { pong = performance.now(); set('dRtt', Math.round(pong - m.t) + ' мс'); set('dSat', m.sat ? 'подключён' : 'не подключён'); }
@@ -78,21 +110,25 @@ function ensureCtx() {
   if (!ctx) {
     ctx = new (window.AudioContext || window.webkitAudioContext)();
     mute = ctx.createGain(); mute.gain.value = 0; mute.connect(ctx.destination);
+    ctx.onstatechange = dCtx;
     wl = ctx.audioWorklet.addModule('worklet.js');
     wake();
   }
   if (ctx.state !== 'running') ctx.resume();
+  // A silent 1-sample buffer inside the gesture unlocks iOS output for later answers.
+  const s = ctx.createBufferSource(); s.buffer = ctx.createBuffer(1, 1, 22050); s.connect(ctx.destination); s.start();
+  dCtx();
 }
 const wantMic = () => listening || !!ptt;
 function openMic() {
   if (mic) return Promise.resolve(mic);
   return micP || (micP = (async () => {
-    set('dMic', 'открываю…');
+    set('dMic', 'открываю…'); sess('play-and-record');
     let st = null;
     try {
       st = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1 } });
       await wl;
-      if (!wantMic()) { st.getTracks().forEach(t => t.stop()); set('dMic', 'выключен'); return null; }
+      if (!wantMic()) { st.getTracks().forEach(t => t.stop()); set('dMic', 'выключен'); sess('playback'); return null; }
       const src = ctx.createMediaStreamSource(st), node = new AudioWorkletNode(ctx, 'pcm16k');
       src.connect(node).connect(mute);
       node.port.onmessage = e => onFrame(e.data);
@@ -117,11 +153,11 @@ function closeMic() { // track.stop() turns off the orange iOS indicator
   const m = mic; mic = null;
   m.node.port.onmessage = null;
   m.st.getTracks().forEach(t => { t.onended = null; t.stop(); });
-  m.src.disconnect(); m.node.disconnect();
+  m.src.disconnect(); m.node.disconnect(); sess('playback');
   set('dMic', 'выключен'); set('lvlMic', 'выключен'); set('lvlSrv', '—'); $('lvl').style.width = '0';
 }
 function micErr(e) {
-  set('dMic', 'ошибка: ' + (e.name || e));
+  set('dMic', 'ошибка: ' + (e.name || e)); sess('playback');
   if (ptt) { ptt = null; sayUi(false); }
   if (listening) setListen(false);
   flash('Ошибка: ' + (e.name === 'NotAllowedError' ? 'нет доступа к микрофону' : e.message || e), 1);
@@ -279,3 +315,9 @@ function vMsg(m) {
   if (m.type === 'verr') flash('Ошибка: ' + m.text, 1);
 }
 vDraw();
+
+// 0.3.3: any tap on the page creates/resumes the AudioContext, so the answer can play later.
+document.addEventListener('pointerdown', ensureCtx, true);
+document.addEventListener('click', ensureCtx, true);
+$('tapPlay').onclick = () => { ensureCtx(); play(); };
+sess('playback'); dCtx();

@@ -48,3 +48,15 @@
   через tar: `tar -C /addons/voice --exclude=.git -cf - . | docker run --rm -i
   -v /var/run/docker.sock:/var/run/docker.sock docker:29.6.2-cli docker buildx build -
   --tag local/voice-test --platform linux/amd64 --pull --progress=plain`.
+
+## Урок: iOS молчит в беззвучном режиме (0.3.3)
+- Ответ доходил (audio-start 22050 Гц, ~12 с), текст был, звука нет: Web Audio в Safari
+  слушается переключателя «беззвучно». Лечит `navigator.audioSession.type` (Safari 16.4+):
+  `play-and-record`, пока открыт микрофон, иначе `playback` — он играет и в беззвучном.
+- AudioContext создаётся/`resume()` только в жесте (`ensureCtx` на любой pointerdown/click)
+  и там же играет беззвучный буфер. Перед ответом снова `resume()` с тайм-аутом 0.6 с:
+  вне жеста промис может не завершиться. Не вышло — кнопка «Нажмите, чтобы услышать ответ».
+- Ответ копится целиком и играется на `ttsend` одним AudioBuffer с частотой из `tts`.
+  `played` для HA шлёт сервер на audio-stop, как раньше.
+- Проверка: строки «Звук», «Audio Session», «Последний ответ» в «Диагностике».
+- `VERSION` в server.py обязан совпадать с `config.yaml`: apply.sh сверяет их.
