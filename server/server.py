@@ -1,17 +1,20 @@
 # Voice 0.4: aiohttp on 8099 (ingress) and 8091 (https); Wyoming satellites 10700-10702.
-import array, asyncio, json, math, os, ssl, time, wave
+import array, asyncio, itertools, json, math, os, ssl, time, wave
 from aiohttp import WSMsgType, web
 from wyoming.event import Event, async_read_event, async_write_event
 from wyoming.info import Attribution, Info, Satellite
 import spk
 
-VERSION = "0.4.1"
+VERSION = "0.4.2"
 PUB = os.path.dirname(os.path.abspath(__file__)) + "/public/"
 REC, TLS = "/data/recordings/", "/data/tls/"
 ROOMS = {"bedroom": ("Спальня", 10700), "living": ("Гостиная", 10701), "kids": ("Детская", 10702)}
 RATE, KEEP, MAX_SEC, MIN_SEC = 16000, 20, 60, 0.4
 FMT, CHUNK = {"rate": RATE, "width": 2, "channels": 1}, 2048  # 1024 samples per chunk
 NC = {"Cache-Control": "no-store"}
+CIDS, RUNS = itertools.count(1), itertools.count(1)  # 0.4.2: ids of HA connections and of runs, for the log
+FLOW = {"transcribe", "voice-started", "voice-stopped", "transcript", "synthesize", "handled",
+        "not-handled", "audio-start", "audio-stop", "error"}  # events of an asr -> tts run
 
 
 class Sat:
@@ -21,6 +24,41 @@ class Sat:
         self.room, (self.name, self.port) = room, ROOMS[room]
         self.ha = self.ws = self.lis = None  # lis: Listen of the page with «Слушать» on
         self.t0 = 0.0  # 0.4.1: end of the last phrase, for the timings in the page diagnostics
+        self.cids, self.rn, self.rw, self.dog, self.got = {}, 0, None, None, []  # 0.4.2: run state
+
+    def cid(self, w):
+        return "#%s" % self.cids.get(w, "?")
+
+    def end(self, why):  # 0.4.2: forget the run: answer played, error, watchdog, reconnect
+        if self.rn:
+            print("[voice] run", self.rn, self.name, self.cid(self.rw), "end:", why, "| events:", " ".join(self.got) or "нет")
+        if self.dog is not None and self.dog is not asyncio.current_task():
+            self.dog.cancel()
+        self.rn, self.rw, self.dog, self.got = 0, None, None, []
+
+    async def lose(self, why, text, drop=False):  # run lost: reset, tell the page, maybe drop the connection
+        w = self.rw
+        self.end(why)
+        if text:
+            await self.to_page({"type": "lost", "text": text})
+        if self.lis and self.lis.st == "busy":
+            self.lis.later(1)
+        if drop and w is not None:
+            print("[voice]", self.name, "closing HA connection", self.cid(w))
+            if self.ha is w:
+                self.ha = None
+            w.close()
+
+    def arm(self, sec, why, text, drop=False):
+        if self.dog is not None:
+            self.dog.cancel()
+        self.dog = asyncio.create_task(self.watch(self.rn, sec, why, text, drop))
+
+    async def watch(self, n, sec, why, text, drop):
+        await asyncio.sleep(sec)
+        if self.rn == n:
+            self.dog = None
+            await self.lose(why, text, drop)
 
     def at(self):  # ms since the end of the phrase
         return round((time.monotonic() - self.t0) * 1000)
@@ -30,8 +68,11 @@ class Sat:
             name="Голос: " + self.name, area=self.name, installed=True, version=VERSION,
             description="Айфон, " + self.name, attribution=Attribution(name="Home Voice", url=""))).event()
 
-    async def to_ha(self, typ, data=None, payload=None):
-        await async_write_event(Event(typ, data or {}, payload), self.ha)
+    async def to_ha(self, typ, data=None, payload=None, w=None):
+        w = w or self.ha
+        if w is None:
+            raise ConnectionError("HA не подключён")
+        await asyncio.wait_for(async_write_event(Event(typ, data or {}, payload), w), 5)  # dead socket: no hang
 
     async def to_page(self, o):
         ws = self.ws
@@ -44,17 +85,29 @@ class Sat:
 
     async def run(self, ws, pcm):
         # Push-to-talk: the whole phrase (with 0.3 s pre-roll from the page) goes to an asr -> tts pipeline.
-        self.ws = ws
-        print("[voice] -> HA", self.name, "run-pipeline", round(len(pcm) / 2 / RATE, 2))
-        await self.to_ha("run-pipeline", {"start_stage": "asr", "end_stage": "tts", "restart_on_end": False})
-        await asyncio.sleep(0.3)  # let HA start the pipeline before audio arrives
-        await self.to_ha("audio-start", {**FMT, "timestamp": 0})
-        for i in range(0, len(pcm), CHUNK):
-            await self.to_ha("audio-chunk", {**FMT, "timestamp": i // 32}, pcm[i:i + CHUNK])
-        await self.to_ha("audio-stop", {"timestamp": len(pcm) // 32})
+        # 0.4.2: always the current connection; the run is watched until audio-stop or error.
+        self.end("новый запуск")
+        if self.ha is None:
+            raise ConnectionError("HA не подключён")
+        self.ws, w, self.rn = ws, self.ha, next(RUNS)
+        self.rw = w
+        print("[voice] run", self.rn, self.name, self.cid(w), "-> HA run-pipeline", round(len(pcm) / 2 / RATE, 2))
+        self.arm(5, "HA молчит 5 с после run-pipeline", NOHA, True)
+        try:
+            await self.to_ha("run-pipeline", {"start_stage": "asr", "end_stage": "tts", "restart_on_end": False}, w=w)
+            await asyncio.sleep(0.3)  # let HA start the pipeline before audio arrives
+            await self.to_ha("audio-start", {**FMT, "timestamp": 0}, w=w)
+            for i in range(0, len(pcm), CHUNK):
+                await self.to_ha("audio-chunk", {**FMT, "timestamp": i // 32}, pcm[i:i + CHUNK], w=w)
+            await self.to_ha("audio-stop", {"timestamp": len(pcm) // 32}, w=w)
+        except Exception as e:
+            if self.rw is w:
+                await self.lose("отправка не удалась: %r" % e, None, True)
+            raise
 
     async def serve(self, reader, writer):
-        print("[voice] HA connected to", self.name, writer.get_extra_info("peername"))
+        c = self.cids[writer] = next(CIDS)
+        print("[voice] HA connected to", self.name, "#%d" % c, writer.get_extra_info("peername"))
         try:
             while (ev := await async_read_event(reader)) is not None:
                 await self.on_event(ev, writer)
@@ -63,21 +116,39 @@ class Sat:
         finally:
             if self.ha is writer:
                 self.ha = None
-            print("[voice] HA disconnected from", self.name)
+            if self.rn and self.rw is writer:
+                await self.lose("соединение #%d закрыто" % c, NOHA)
+            print("[voice] HA disconnected from", self.name, "#%d" % c)
+            self.cids.pop(writer, None)
             writer.close()
 
     async def on_event(self, ev, w):
         t, d = ev.type, ev.data or {}
+        mine = bool(self.rn) and w is self.rw
         if t != "audio-chunk":
-            print("[voice] <- HA", self.name, t, json.dumps(d, ensure_ascii=False)[:200])
+            print("[voice] <- HA", self.name, self.cid(w), "run %d" % self.rn if mine else "-", t,
+                  json.dumps(d, ensure_ascii=False)[:200])
+        if mine and t in FLOW and len(self.got) < 12:
+            self.got.append(t)
+        if mine and t == "transcript":
+            self.arm(30, "нет ответа агента 30 с после transcript", NOANS)
+        elif mine and t in ("synthesize", "handled", "not-handled", "audio-start"):
+            self.arm(60, "нет audio-stop 60 с после ответа", None)
         if t == "describe":
             await async_write_event(self.info(), w)
         elif t == "ping":
             await async_write_event(Event("pong", {"text": d.get("text")}), w)
         elif t == "run-satellite":
-            self.ha = w
+            old, self.ha = self.ha, w
+            if old is not None and old is not w:  # HA reconnected: the old connection and its run are gone
+                print("[voice]", self.name, "HA reconnected", self.cid(old), "->", self.cid(w))
+                if self.rw is old:
+                    await self.lose("HA переподключился", NOHA)
+                old.close()
         elif t == "pause-satellite" and self.ha is w:
             self.ha = None
+            if self.rw is w:
+                await self.lose("pause-satellite", NOHA)
         elif t == "transcript":
             await self.to_page({"type": "heard", "text": d.get("text") or "", "at": self.at()})
         elif t in ("synthesize", "handled", "not-handled"):
@@ -88,12 +159,16 @@ class Sat:
             await self.to_page(ev.payload)
         elif t == "audio-stop":
             await self.to_page({"type": "ttsend"})
-            await async_write_event(Event("played", {}), w)
+            if mine:
+                self.end("audio-stop")
+            await asyncio.wait_for(async_write_event(Event("played", {}), w), 5)
         elif t == "detection" and self.lis:
             await self.lis.detected()
         elif t == "error":
             if self.lis:
                 self.lis.err()
+            if mine:
+                self.end("error " + str(d.get("code")))
             await self.to_page({"type": "perr", "text": d.get("text") or d.get("code") or "?"})
 
 

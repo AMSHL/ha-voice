@@ -170,6 +170,7 @@ function onMsg(m) {
     if (m.s === 'none') flash('Не расслышал команду');
     else if (m.s !== 'wake' || performance.now() > flT) { clearTimeout(stT); idle(); }
   }
+  if (m.type === 'lost') { clearTimeout(stT); idle(); flash(m.text, 1); set('answer', m.text); }  // 0.4.2 watchdog
   if (m.type === 'perr') { flash('Ошибка: ' + m.text, 1); set('answer', 'Ошибка: ' + m.text); }
   if (m.type === 'hello') set('ver', 'v' + m.version);
   if (m.type === 'pong') { pong = performance.now(); set('dRtt', Math.round(pong - m.t) + ' мс'); set('dSat', m.sat ? 'подключён' : 'не подключён'); }
