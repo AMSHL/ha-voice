@@ -1,14 +1,15 @@
 // Voice 2a: mic -> 16 kHz int16, 20 ms frames -> WebSocket; answer audio back -> Web Audio.
+// Mic is open only while "Сказать" is held or "Слушать" is on; AudioContext stays for playback.
 const $ = id => document.getElementById(id);
 const set = (id, t) => { $(id).textContent = t; };
-const PRE = 15, MIN_HOLD = 400; // 15 frames = 0.3 s pre-roll
+const PRE = 15, MIN_HOLD = 400; // 15 frames = 0.3 s pre-roll (only with "Слушать")
 let room = localStorage.getItem('voice.room');
 if (!['bedroom', 'living', 'kids'].includes(room)) room = 'bedroom';
 let listening = false, ptt = null, ws = null, ok = false, retry = 1000;
-let pre = [], ctx = null, pong = 0, stT = 0, lvlT = 0, peak = -100;
+let pre = [], ctx = null, mute = null, wl = null, mic = null, micP = null, pong = 0, stT = 0, lvlT = 0, peak = -100;
 
 function status(t, err) { $('status').textContent = t; $('status').className = err ? 'err' : ''; }
-function idle() { status(ptt ? 'Говорите…' : listening ? 'Слушаю' : 'Ожидание'); }
+function idle() { status(ptt ? (ptt.live ? 'Говорите…' : 'Готовлюсь…') : listening ? 'Слушаю' : 'Ожидание'); }
 function flash(t, err) { status(t, err); clearTimeout(stT); stT = setTimeout(idle, err ? 4000 : 2000); }
 const sendJ = o => ok && ws.send(JSON.stringify(o));
 const sendB = b => ok && ws.send(b);
@@ -38,7 +39,7 @@ function drop() {
   const s = ws; ws = null; ok = false;
   s.onclose = null; s.close();
   set('dNet', 'нет, переподключаюсь…'); set('lvlSrv', '—');
-  if (ptt) { ptt = null; sayUi(false); flash('Ошибка: связь пропала', 1); }
+  if (ptt) { release(ptt.id, true); flash('Ошибка: связь пропала', 1); }
   setTimeout(connect, retry); retry = Math.min(retry * 2, 10000);
 }
 setInterval(() => {
@@ -66,30 +67,64 @@ function onMsg(m) {
   if (m.type === 'perr') { flash('Ошибка: ' + m.text, 1); set('answer', 'Ошибка: ' + m.text); }
   if (m.type === 'hello') set('ver', 'v' + m.version);
   if (m.type === 'pong') { pong = performance.now(); set('dRtt', Math.round(pong - m.t) + ' мс'); set('dSat', m.sat ? 'подключён' : 'не подключён'); }
-  if (m.type === 'level') set('lvlSrv', m.db + ' дБ');
+  if (m.type === 'level' && mic) set('lvlSrv', m.db + ' дБ');
   if (m.type === 'saved') { flash('Отправлено: ' + m.sec + ' с'); loadRec(); }
   if (m.type === 'short') flash('Слишком коротко');
 }
 
-$('start').onclick = async () => {
-  set('dMic', 'запрашиваю…');
-  try {
-    const st = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1 } });
+// Called synchronously inside a tap: iOS lets an AudioContext start only from a gesture.
+function ensureCtx() {
+  if (!ctx) {
     ctx = new (window.AudioContext || window.webkitAudioContext)();
-    await ctx.audioWorklet.addModule('worklet.js');
-    const node = new AudioWorkletNode(ctx, 'pcm16k'), mute = ctx.createGain();
-    mute.gain.value = 0;
-    ctx.createMediaStreamSource(st).connect(node).connect(mute).connect(ctx.destination);
-    node.port.onmessage = e => onFrame(e.data);
-    await ctx.resume();
-    st.getAudioTracks()[0].onended = () => { set('dMic', 'отключён'); status('Ошибка: микрофон отключён', 1); };
-    set('dMic', 'разрешён'); set('dRate', ctx.sampleRate + ' → 16000 Гц');
-    $('start').hidden = true; idle(); wake();
-  } catch (e) {
-    set('dMic', 'ошибка: ' + (e.name || e));
-    status('Ошибка: ' + (e.name === 'NotAllowedError' ? 'нет доступа к микрофону' : e.message || e), 1);
+    mute = ctx.createGain(); mute.gain.value = 0; mute.connect(ctx.destination);
+    wl = ctx.audioWorklet.addModule('worklet.js');
+    wake();
   }
-};
+  if (ctx.state !== 'running') ctx.resume();
+}
+const wantMic = () => listening || !!ptt;
+function openMic() {
+  if (mic) return Promise.resolve(mic);
+  return micP || (micP = (async () => {
+    set('dMic', 'открываю…');
+    let st = null;
+    try {
+      st = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1 } });
+      await wl;
+      if (!wantMic()) { st.getTracks().forEach(t => t.stop()); set('dMic', 'выключен'); return null; }
+      const src = ctx.createMediaStreamSource(st), node = new AudioWorkletNode(ctx, 'pcm16k');
+      src.connect(node).connect(mute);
+      node.port.onmessage = e => onFrame(e.data);
+      st.getAudioTracks()[0].onended = () => {
+        if (ptt) release(ptt.id, true);
+        if (listening) setListen(false);
+        closeMic(); flash('Ошибка: микрофон отключён', 1);
+      };
+      mic = { st, src, node };
+      set('dMic', 'открыт'); set('dRate', ctx.sampleRate + ' → 16000 Гц');
+      if (listening) listen.lastChild.textContent = 'поток идёт';
+      return mic;
+    } catch (e) {
+      if (st && !mic) st.getTracks().forEach(t => t.stop());
+      throw e;
+    } finally { micP = null; }
+  })());
+}
+function closeMic() { // track.stop() turns off the orange iOS indicator
+  pre = [];
+  if (!mic) return;
+  const m = mic; mic = null;
+  m.node.port.onmessage = null;
+  m.st.getTracks().forEach(t => { t.onended = null; t.stop(); });
+  m.src.disconnect(); m.node.disconnect();
+  set('dMic', 'выключен'); set('lvlMic', 'выключен'); set('lvlSrv', '—'); $('lvl').style.width = '0';
+}
+function micErr(e) {
+  set('dMic', 'ошибка: ' + (e.name || e));
+  if (ptt) { ptt = null; sayUi(false); }
+  if (listening) setListen(false);
+  flash('Ошибка: ' + (e.name === 'NotAllowedError' ? 'нет доступа к микрофону' : e.message || e), 1);
+}
 
 function onFrame(buf) {
   const a = new Int16Array(buf);
@@ -100,52 +135,77 @@ function onFrame(buf) {
     $('lvl').style.width = Math.max(0, Math.min(100, (peak + 60) * 5 / 3)) + '%';
     set('lvlMic', Math.round(peak) + ' дБ'); peak = -100; lvlT = performance.now();
   }
+  if (ptt && !ptt.live) { // first real (non-zero) frame: now the person may speak
+    if (!sq) return;
+    goLive(ptt);
+  }
   if (ptt || listening) sendB(buf);
   pre.push(buf); if (pre.length > PRE) pre.shift();
 }
 
 const listen = $('listen'), say = $('say');
-listen.onclick = () => {
-  if (!ctx) return flash('Сначала включите микрофон', 1);
-  listening = !listening;
-  listen.classList.toggle('on', listening);
-  listen.lastChild.textContent = listening ? 'поток идёт' : 'выключено';
+function setListen(on) {
+  listening = on;
+  listen.classList.toggle('on', on);
+  listen.lastChild.textContent = on ? (mic ? 'поток идёт' : 'включаю…') : 'выключено';
   sendJ(mode()); idle();
+  if (!on && !ptt) closeMic();
+}
+listen.onclick = () => {
+  if (listening) return setListen(false);
+  ensureCtx(); setListen(true);
+  openMic().catch(micErr);
 };
 
-function sayUi(on) {
-  say.classList.toggle('down', on); say.classList.remove('out');
-  say.lastChild.textContent = on ? 'отпустите — отправить' : 'держите и говорите';
+function sayUi(s) {
+  say.classList.toggle('prep', s === 'prep'); say.classList.toggle('down', s === 'talk'); say.classList.remove('out');
+  say.lastChild.textContent = s === 'prep' ? 'готовлюсь…' : s === 'talk' ? 'говорите' : 'держите и говорите';
+}
+function goLive(p) {
+  p.live = true; p.t = performance.now();
+  sendJ({ type: 'start', room });
+  sayUi('talk'); if (!p.out) idle();
 }
 say.oncontextmenu = e => e.preventDefault();
 say.addEventListener('touchstart', e => e.preventDefault(), { passive: false });
 say.onpointerdown = e => {
   if (ptt) return;
-  if (!ctx) return flash('Сначала включите микрофон', 1);
   if (!ok) return flash('Ошибка: нет связи', 1);
-  say.setPointerCapture(e.pointerId);
-  ptt = { t: performance.now(), id: e.pointerId, out: false };
-  sendJ({ type: 'start', room });
-  pre.forEach(b => sendB(b));
-  sayUi(true); idle();
+  ensureCtx();
+  try { say.setPointerCapture(e.pointerId); } catch (_) {}
+  const p = ptt = { id: e.pointerId, out: false, live: false, t: 0 };
+  clearTimeout(stT);
+  if (mic && listening) { goLive(p); pre.forEach(b => sendB(b)); return; }
+  sayUi('prep'); idle();
+  openMic().catch(micErr);
 };
 say.onpointermove = e => {
   if (!ptt || e.pointerId !== ptt.id) return;
   const r = say.getBoundingClientRect();
   ptt.out = e.clientX < r.left || e.clientX > r.right || e.clientY < r.top || e.clientY > r.bottom;
   say.classList.toggle('out', ptt.out);
-  status(ptt.out ? 'Отпустите — отмена' : 'Говорите…');
+  if (ptt.out) status('Отпустите — отмена'); else idle();
 };
-function release(e, cancel) {
-  if (!ptt || e.pointerId !== ptt.id) return;
-  const held = performance.now() - ptt.t, out = ptt.out;
+function release(id, cancel) { // idempotent: every end/cancel path lands here
+  const p = ptt;
+  if (!p || id !== p.id) return;
   ptt = null; sayUi(false);
-  if (cancel || out || held < MIN_HOLD) {
-    sendJ({ type: 'cancel' }); flash(cancel || out ? 'Отменено' : 'Промах: держите дольше');
+  if (!p.live) flash(cancel || p.out ? 'Отменено' : 'Держите кнопку чуть дольше');
+  else if (cancel || p.out || performance.now() - p.t < MIN_HOLD) {
+    sendJ({ type: 'cancel' }); flash(cancel || p.out ? 'Отменено' : 'Коротко: держите кнопку чуть дольше');
   } else { sendJ({ type: 'end' }); status('Отправляю…'); }
+  if (!listening) closeMic();
 }
-say.onpointerup = e => release(e, false);
-say.onpointercancel = e => release(e, true);
+say.onpointerup = e => release(e.pointerId, false);
+say.onpointercancel = e => release(e.pointerId, true);
+say.onlostpointercapture = e => release(e.pointerId, false);
+// Safety net: no finger left on the button -> the press is over, whatever pointer events did.
+const touchEnd = cancel => e => {
+  if (ctx && ctx.state !== 'running') ctx.resume();
+  if (ptt && !Array.from(e.touches).some(t => say.contains(t.target))) release(ptt.id, cancel);
+};
+document.addEventListener('touchend', touchEnd(false));
+document.addEventListener('touchcancel', touchEnd(true));
 
 async function wake() {
   try {
@@ -153,12 +213,16 @@ async function wake() {
     set('dWake', 'не гаснет'); l.onrelease = () => set('dWake', 'может погаснуть');
   } catch (e) { set('dWake', 'Wake Lock нет: ' + e.name); }
 }
+function away() { // left the page: cancel the press and close the mic
+  if (ptt) release(ptt.id, true);
+  if (listening) setListen(false);
+  closeMic();
+}
 document.onvisibilitychange = () => {
-  if (document.hidden) return;
-  if (ctx) ctx.resume();
-  wake();
+  if (document.hidden) return away();
+  if (ctx) { ctx.resume(); wake(); }
 };
-document.addEventListener('touchend', () => ctx && ctx.state !== 'running' && ctx.resume());
+window.addEventListener('pagehide', away);
 
 async function loadRec() {
   try {

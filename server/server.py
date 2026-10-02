@@ -4,7 +4,7 @@ from aiohttp import WSMsgType, web
 from wyoming.event import Event, async_read_event, async_write_event
 from wyoming.info import Attribution, Info, Satellite
 
-VERSION = "0.2.0"
+VERSION = "0.2.1"
 PUB = os.path.dirname(os.path.abspath(__file__)) + "/public/"
 REC, TLS = "/data/recordings/", "/data/tls/"
 ROOMS = {"bedroom": ("Спальня", 10700), "living": ("Гостиная", 10701), "kids": ("Детская", 10702)}

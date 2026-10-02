@@ -11,6 +11,8 @@
 - WS: JSON `hello|mode|room`, `start|end|cancel`, `ping`; бинарь — int16 16 кГц
   моно, 320 отсчётов. Ответы: `level`, `saved`, `short`, `pong` (+`sat`), `nosat`,
   `sent`, `heard`, `answer`, `tts` (формат) + бинарь int16 озвучки, `ttsend`, `perr`.
+- Микрофон открыт, только пока держат «Сказать» (кнопка: «готовлюсь…» до первого
+  кадра, потом «говорите») или включено «Слушать»; AudioContext живёт для ответа.
 - Wyoming (`class Sat`): 10700 Спальня, 10701 Гостиная, 10702 Детская. Принимает
   `describe ping run-satellite pause-satellite transcript synthesize audio-* error`;
   шлёт `info pong run-pipeline(asr→tts) audio-start/chunk/stop played`.
