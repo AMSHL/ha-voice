@@ -1,6 +1,6 @@
 name: "Голос"
 slug: "voice"
-version: "0.4.0"
+version: "0.4.1"
 description: "Голосовой ассистент на айфоне"
 arch:
   - "amd64"
@@ -22,9 +22,13 @@ ports_description:
   10702/tcp: "Wyoming-спутник: Детская"
 options:
   host_ip: "192.168.1.123"
-  threshold: 0.45
-  margin: 0.08
+  min_conf: 70
+  conf_temp: 0.07
+  conf_anchor: 0.25
+  vad_tail: 0.6
 schema:
   host_ip: "str"
-  threshold: "float(0,1)"
-  margin: "float(0,1)"
+  min_conf: "int(0,100)"
+  conf_temp: "float(0.01,1)"
+  conf_anchor: "float(0,1)"
+  vad_tail: "float(0.3,2)"

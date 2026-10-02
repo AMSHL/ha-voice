@@ -1,5 +1,5 @@
 # Voice 0.3: who is speaking. 3D-Speaker CAM++ ONNX embeddings over a numpy Kaldi-style fbank.
-import asyncio, json, os, time, wave
+import asyncio, json, math, os, time, wave
 import aiohttp
 import numpy as np
 from aiohttp import web
@@ -7,7 +7,7 @@ from aiohttp import web
 MODEL, VD = "/opt/voice/spk.onnx", "/data/voices/"
 PEOPLE = {"anatoly": "Анатолий", "evgeniya": "Евгения", "leya": "Лея"}
 UNK = "Неизвестно"
-OPT = {"threshold": 0.45, "margin": 0.08}
+OPT = {"min_conf": 70, "conf_temp": 0.07, "conf_anchor": 0.25, "vad_tail": 0.6}
 try:
     with open("/data/options.json") as f:
         OPT.update({k: v for k, v in json.load(f).items() if k in OPT})
@@ -98,16 +98,25 @@ def _manage(t, p):
     return {"type": "vstat", "p": p, "n": recalc(p)}
 
 
+def conf(sims):
+    # 0.4.1: readable confidence, %. Softmax of the similarities (temperature conf_temp) plus an «unknown»
+    # anchor with similarity conf_anchor: counts both the gap to the runner-up and how close the best is at all.
+    if not sims:
+        return None, 0
+    best = max(sims, key=sims.get)
+    z = sum(math.exp((s - sims[best]) / OPT["conf_temp"]) for s in list(sims.values()) + [OPT["conf_anchor"]])
+    return best, round(100 / z)
+
+
 def identify(pcm):
     sec, a = speech(pcm)
     if sec < 0.5:
         raise ValueError("мало речи (%s с)" % sec)
     e = embed(a)
     sims = {PEOPLE[p]: round(float(c @ e), 3) for p, c in list(cent.items())}
-    r = sorted(sims.values(), reverse=True) + [-1.0]
-    if r[0] >= OPT["threshold"] and r[0] - r[1] >= OPT["margin"]:
-        return max(sims, key=sims.get), round(r[0] * 100), sims
-    return UNK, 0, sims
+    best, c = conf(sims)
+    ok = c >= OPT["min_conf"]
+    return (best if ok else UNK), (c if ok else 0), sims, best, c
 
 
 def warm():
@@ -150,10 +159,10 @@ async def ha(svc, data):
 
 
 async def before(room, pcm):  # who spoke -> HA helpers, awaited before the pipeline; never raises
-    t, who, pct, sims, err = time.monotonic(), UNK, 0, {}, None
+    t, who, pct, sims, best, c, err = time.monotonic(), UNK, 0, {}, None, 0, None
     if cent:
         try:
-            who, pct, sims = await asyncio.wait_for(
+            who, pct, sims, best, c = await asyncio.wait_for(
                 asyncio.get_running_loop().run_in_executor(None, identify, pcm), 1.5)
         except Exception as e:
             err = str(e) or type(e).__name__
@@ -165,7 +174,7 @@ async def before(room, pcm):  # who spoke -> HA helpers, awaited before the pipe
     except Exception as e:
         err = (err or "") + " HA: " + (str(e) or type(e).__name__)
     rec = {"t": time.strftime("%Y-%m-%d %H:%M:%S"), "room": room, "who": who, "pct": pct,
-           "sims": sims, "ms": ms, "err": err}
+           "sims": sims, "best": best, "conf": c, "ms": ms, "err": err}
     print("[voice] who", json.dumps(rec, ensure_ascii=False))
     try:
         log(rec)
@@ -182,8 +191,8 @@ async def voice_cmd(v, p, pcm):  # "rec": save a sample of p; "check": identify,
         if not cent:
             return {"type": "verr", "text": "образцов ещё нет"}
         t = time.monotonic()
-        who, pct, sims = await run(identify, pcm)
-        return {"type": "vcheck", "who": who, "pct": pct, "sims": sims, "ms": round((time.monotonic() - t) * 1000)}
+        who, pct, sims, best, c = await run(identify, pcm)
+        return {"type": "vcheck", "who": who, "pct": pct, "sims": sims, "best": best, "conf": c, "ms": round((time.monotonic() - t) * 1000)}
     except Exception as e:
         return {"type": "verr", "text": str(e) or type(e).__name__}
 

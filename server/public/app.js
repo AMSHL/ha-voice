@@ -61,9 +61,9 @@ setInterval(() => {
   if (performance.now() - pong > 7000) return drop();
   sendJ({ type: 'ping', t: performance.now() });
 }, 2000);
-// 0.3.3: the answer is collected whole and played at 'ttsend' with the rate from 'tts' (HA sends 22050).
+// 0.3.3/0.4.1: answer in the rate from 'tts' (HA sends 22050), streamed into Web Audio, see ttsStart().
 // iOS: navigator.audioSession 'playback' ignores the silent switch; 'play-and-record' only while the mic is open.
-let fmt = null, chunks = [], last = null;
+let fmt = null, chunks = [], last = null, S = null, tm = {};
 function sess(t) {
   const a = navigator.audioSession;
   if (a && t) try { a.type = t; } catch (_) {}
@@ -72,16 +72,70 @@ function sess(t) {
 function dCtx() { set('dCtx', ctx ? 'AudioContext ' + ctx.state : 'ещё не было касания'); }
 function dLast() { if (last) set('dLast', last.sec.toFixed(1) + ' с, проигран ' + (last.played ? 'да' : 'нет')); }
 function tapUi(on) { $('tapPlay').hidden = !on; }
-function tts(buf) { if (fmt) chunks.push(buf); } // int16 chunk of the answer, format from the last 'tts' message
-function ttsDone() {
-  const len = chunks.reduce((n, b) => n + (b.byteLength >> 1), 0), pcm = new Int16Array(len);
+function tts(buf) { // int16 chunk of the answer, format from the last 'tts' message
+  if (!fmt) return;
+  const a = new Int16Array(buf, 0, buf.byteLength >> 1);
+  chunks.push(a);
+  if (S) { S.q.push(a); S.n += a.length; pump(S); }
+}
+const toBuf = (pcm, ch, rate) => {
+  const n = Math.floor(pcm.length / ch), b = ctx.createBuffer(ch, n, rate);
+  for (let c = 0; c < ch; c++) { const d = b.getChannelData(c); for (let i = 0; i < n; i++) d[i] = pcm[i * ch + c] / 32768; }
+  return b;
+};
+function join(list) {
+  const pcm = new Int16Array(list.reduce((n, a) => n + a.length, 0));
   let o = 0;
-  for (const b of chunks) { const a = new Int16Array(b, 0, b.byteLength >> 1); pcm.set(a, o); o += a.length; }
+  for (const a of list) { pcm.set(a, o); o += a.length; }
+  return pcm;
+}
+// 0.4.1: the answer plays while it streams. AudioContext is resumed at 'tts' (at most 0.6 s);
+// not running -> the old path: the whole answer at 'ttsend', else the "tap to hear" button.
+function ttsStart(m) {
+  fmt = m; chunks = []; tapUi(false);
+  const s = S = { q: [], n: 0, t: 0, live: 0, ok: false, end: false, dead: false, done: false, first: false };
+  if (!ctx || m.width !== 2) return;
+  sess(mic ? 'play-and-record' : 'playback');
+  const go = () => { dCtx(); if (S === s && !s.dead && ctx.state === 'running') { s.ok = true; pump(s); } };
+  if (ctx.state === 'running') return go();
+  Promise.race([ctx.resume(), new Promise(r => setTimeout(r, 600))]).then(go, go);
+}
+function pump(s) { // first piece after 0.3 s is buffered, then pieces of >=0.1 s, back to back to the sample
+  if (!s.ok || s.dead || !s.n) return;
+  const ch = fmt.channels || 1, now = ctx.currentTime;
+  if (!s.end && s.n / ch / fmt.rate < (s.t ? 0.1 : 0.3)) return;
+  if (s.t < now + 0.02) s.t = now + 0.05; // start, or the queue ran dry: a short gap, never an overlap
+  const src = ctx.createBufferSource(), pcm = join(s.q);
+  s.q = []; s.n = 0;
+  src.buffer = toBuf(pcm, ch, fmt.rate); src.connect(ctx.destination); src.start(s.t);
+  if (!s.first) { s.first = true; sound((s.t - now + (ctx.outputLatency || 0)) * 1000); }
+  s.t += pcm.length / ch / fmt.rate; s.live++;
+  src.onended = () => { if (--s.live === 0 && s.end && !s.n) fin(s); };
+}
+function fin(s) {
+  if (s.done || S !== s) return;
+  s.done = true; sendJ({ type: 'played' }); if (listening) lst = 'wake'; idle();
+}
+function mark(m) { // 0.4.1: m.at = ms since the end of the phrase (server clock); 'tts' ties in the page clock
+  const k = { who: 'who', heard: 'asr', answer: 'ag', tts: 'ag' }[m.type];
+  if (k && tm[k] == null) tm[k] = m.at;
+  if (m.type === 'tts') tm.base = performance.now() - m.at;
+  dTm();
+}
+function sound(dt) { if (tm.snd == null && tm.base != null) { tm.snd = Math.round(performance.now() + dt - tm.base); dTm(); } }
+function dTm() {
+  const f = (t, k) => tm[k] == null ? '' : t + ' ' + tm[k];
+  set('dTm', [f('опознание', 'who'), f('распознано', 'asr'), f('агент', 'ag'), f('звук', 'snd')].filter(Boolean).join(' → ') + ' мс');
+}
+function ttsDone() {
+  const s = S, pcm = join(chunks), ch = fmt && fmt.channels || 1;
   chunks = [];
-  if (!fmt || fmt.width !== 2 || !len) { sendJ({ type: 'played' }); return idle(); }
-  const ch = fmt.channels || 1;
-  last = { pcm, ch, rate: fmt.rate, sec: len / ch / fmt.rate, played: false };
-  dLast(); play();
+  if (!fmt || fmt.width !== 2 || !pcm.length) { if (s) s.dead = true; sendJ({ type: 'played' }); return idle(); }
+  last = { pcm, ch, rate: fmt.rate, sec: pcm.length / ch / fmt.rate, played: !!(s && s.ok) };
+  dLast();
+  if (s && s.ok) { s.end = true; pump(s); if (!s.live) fin(s); return; }
+  if (s) s.dead = true;
+  play();
 }
 function play() { // also called from the "tap to hear" button, inside its gesture
   const L = last;
@@ -93,9 +147,7 @@ function play() { // also called from the "tap to hear" button, inside its gestu
     dCtx();
     if (L !== last || L.played) return;
     if (ctx.state !== 'running') return ask();
-    const n = Math.floor(L.pcm.length / L.ch), b = ctx.createBuffer(L.ch, n, L.rate);
-    for (let c = 0; c < L.ch; c++) { const d = b.getChannelData(c); for (let i = 0; i < n; i++) d[i] = L.pcm[i * L.ch + c] / 32768; }
-    const s = ctx.createBufferSource(); s.buffer = b; s.connect(ctx.destination);
+    const s = ctx.createBufferSource(); s.buffer = toBuf(L.pcm, L.ch, L.rate); s.connect(ctx.destination); sound(0);
     s.onended = () => { sendJ({ type: 'played' }); if (listening) lst = 'wake'; idle(); }; s.start();
     L.played = true; tapUi(false); dLast(); clearTimeout(stT); status('Отвечаю…');
   };
@@ -104,12 +156,13 @@ function play() { // also called from the "tap to hear" button, inside its gestu
   Promise.race([ctx.resume(), new Promise(r => setTimeout(r, 600))]).then(go, go);
 }
 function onMsg(m) {
+  if (m.at != null) mark(m);
   if (m.type[0] === 'v' || m.type === 'who') return vMsg(m);
   if (m.type === 'nosat') flash('Home Assistant не подключён к спутнику ' + m.room, 1);
-  if (m.type === 'sent') { clearTimeout(stT); status('Думаю…'); stT = setTimeout(idle, 15000); set('heard', '…'); set('answer', '…'); tapUi(false); fmt = null; chunks = []; }
+  if (m.type === 'sent') { clearTimeout(stT); status('Думаю…'); stT = setTimeout(idle, 15000); set('heard', '…'); set('answer', '…'); tapUi(false); fmt = null; chunks = []; S = null; }
   if (m.type === 'heard') set('heard', m.text || '(ничего не распознано)');
   if (m.type === 'answer') set('answer', m.text || '—');
-  if (m.type === 'tts') { fmt = m; chunks = []; clearTimeout(stT); status('Отвечаю…'); stT = setTimeout(idle, 15000); }
+  if (m.type === 'tts') { ttsStart(m); clearTimeout(stT); status('Отвечаю…'); stT = setTimeout(idle, 15000); }
   if (m.type === 'ttsend') ttsDone();
   if (m.type === 'lstate' && listening) {
     lst = m.s === 'none' ? 'wake' : m.s;
@@ -121,7 +174,7 @@ function onMsg(m) {
   if (m.type === 'hello') set('ver', 'v' + m.version);
   if (m.type === 'pong') { pong = performance.now(); set('dRtt', Math.round(pong - m.t) + ' мс'); set('dSat', m.sat ? 'подключён' : 'не подключён'); }
   if (m.type === 'level' && mic) set('lvlSrv', m.db + ' дБ');
-  if (m.type === 'saved') { flash('Отправлено: ' + m.sec + ' с'); loadRec(); }
+  if (m.type === 'saved') { tm = {}; set('dTm', '…'); flash('Отправлено: ' + m.sec + ' с'); loadRec(); }
   if (m.type === 'short') flash('Слишком коротко');
 }
 
@@ -323,13 +376,14 @@ $('vplay').onclick = () => {
   const a = $('vaudio');
   a.src = 'api/voices/' + per + '/last.wav?t=' + Date.now(); a.play().catch(() => flash('Образцов нет', 1));
 };
+const wtxt = m => m.who + (m.pct ? ' (' + m.pct + ' %)' : m.best ? ' (ближе всех ' + m.best + ', ' + m.conf + ' %)' : '');
 function vMsg(m) {
-  if (m.type === 'who') set('who', m.who + (m.pct ? ' (' + m.pct + ' %)' : '') + (m.err ? ' · ' + m.err : ''));
+  if (m.type === 'who') set('who', wtxt(m) + (m.err ? ' · ' + m.err : ''));
   if (m.type === 'vstat' && m.p === per) set('vcnt', 'Записано ' + m.n + ' из 15–20');
   if (m.type === 'vstat' && m.ok) { phi++; vDraw(); flash('Образец сохранён'); }
   if (m.type === 'vshort') flash('Тихо или мало речи (' + m.sec + ' с) — прочитайте фразу целиком', 1);
   if (m.type === 'vcheck') {
-    flash('Говорит: ' + m.who + (m.pct ? ' (' + m.pct + ' %)' : ''));
+    flash('Говорит: ' + wtxt(m));
     set('vres', Object.entries(m.sims).map(([k, v]) => k + ': ' + v.toFixed(2)).join(' · ') + ' · ' + m.ms + ' мс');
   }
   if (m.type === 'verr') flash('Ошибка: ' + m.text, 1);

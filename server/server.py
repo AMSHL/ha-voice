@@ -5,7 +5,7 @@ from wyoming.event import Event, async_read_event, async_write_event
 from wyoming.info import Attribution, Info, Satellite
 import spk
 
-VERSION = "0.4.0"
+VERSION = "0.4.1"
 PUB = os.path.dirname(os.path.abspath(__file__)) + "/public/"
 REC, TLS = "/data/recordings/", "/data/tls/"
 ROOMS = {"bedroom": ("Спальня", 10700), "living": ("Гостиная", 10701), "kids": ("Детская", 10702)}
@@ -20,6 +20,10 @@ class Sat:
     def __init__(self, room):
         self.room, (self.name, self.port) = room, ROOMS[room]
         self.ha = self.ws = self.lis = None  # lis: Listen of the page with «Слушать» on
+        self.t0 = 0.0  # 0.4.1: end of the last phrase, for the timings in the page diagnostics
+
+    def at(self):  # ms since the end of the phrase
+        return round((time.monotonic() - self.t0) * 1000)
 
     def info(self):
         return Info(satellite=Satellite(
@@ -75,11 +79,11 @@ class Sat:
         elif t == "pause-satellite" and self.ha is w:
             self.ha = None
         elif t == "transcript":
-            await self.to_page({"type": "heard", "text": d.get("text") or ""})
+            await self.to_page({"type": "heard", "text": d.get("text") or "", "at": self.at()})
         elif t in ("synthesize", "handled", "not-handled"):
-            await self.to_page({"type": "answer", "text": d.get("text") or ""})
+            await self.to_page({"type": "answer", "text": d.get("text") or "", "at": self.at()})
         elif t == "audio-start":
-            await self.to_page({"type": "tts", **{k: d.get(k, v) for k, v in FMT.items()}})
+            await self.to_page({"type": "tts", "at": self.at(), **{k: d.get(k, v) for k, v in FMT.items()}})
         elif t == "audio-chunk" and ev.payload:
             await self.to_page(ev.payload)
         elif t == "audio-stop":
@@ -99,7 +103,7 @@ SATS = {r: Sat(r) for r in ROOMS}
 class Listen:
     """«Слушать»: HA hears the wake word (pipeline wake -> wake). After detection the command is cut here
     by own VAD, then who -> helpers -> asr pipeline like push-to-talk, so the helpers are set first."""
-    PRE, TAIL, MAXC, NOVOICE, VOICED = 15, 0.8, 8.0, 4.0, 0.3
+    PRE, TAIL, MAXC, NOVOICE, VOICED = 15, spk.OPT["vad_tail"], 8.0, 4.0, 0.3
 
     def __init__(self, ws):
         self.ws, self.room, self.sat, self.ha, self.st, self.t, self.ans = ws, None, None, None, "off", 0.0, False
@@ -201,7 +205,7 @@ class Listen:
             await self.finish()
 
     async def finish(self):
-        pcm, voiced = bytes(self.buf), self.voiced
+        t0, pcm, voiced = time.monotonic(), bytes(self.buf), self.voiced
         self.buf = bytearray()
         await self.hold()
         print("[voice] command", self.sat.name, round(len(pcm) / 2 / RATE, 2), "voiced", round(voiced, 2))
@@ -209,20 +213,21 @@ class Listen:
             await self.tell("none")
             return await self.wake()
         await self.tell("busy")
-        self.ans = await command(self.ws, self.room, pcm)
+        self.ans = await command(self.ws, self.room, pcm, t0)
         if not self.ans:
             self.later(2)
 
 
-async def command(ws, room, pcm):
+async def command(ws, room, pcm, t0=None):
     """Phrase -> saved, who -> helpers, then the asr pipeline (push-to-talk and «Слушать»). True if sent."""
     send = lambda o: ws.send_str(json.dumps(o))
+    SATS[room].t0 = t0 or time.monotonic()
     sec = round(len(pcm) / 2 / RATE, 2)
     name = await asyncio.get_running_loop().run_in_executor(None, save, room, pcm)
     print("[voice] saved", name, sec)
     await send({"type": "saved", "name": name, "sec": sec})
     sat = SATS[room]
-    await send(await spk.before(sat.name, pcm))
+    await send({**await spk.before(sat.name, pcm), "at": sat.at()})
     if sat.ha is None:
         await send({"type": "nosat", "room": sat.name})
         return False
