@@ -247,7 +247,8 @@ const PH = ['Включи свет на кухне', 'Какая завтра п
   'Позвони бабушке вечером', 'Почитай мне сказку', 'Какие новости на сегодня?',
   'Выключи везде свет, мы спим', 'Раз, два, три, четыре, пять', 'Кондиционер на двадцать три градуса'];
 let tab = 'cmd', vm = 'rec', phi = Math.floor(Math.random() * PH.length), per = localStorage.getItem('voice.p');
-if (!['anatoly', 'zhenya', 'leya'].includes(per)) per = 'anatoly';
+if (per === 'zhenya') per = 'evgeniya';
+if (!['anatoly', 'evgeniya', 'leya'].includes(per)) per = 'anatoly';
 const vmode = () => tab === 'vox' ? { v: vm, p: per } : {};
 const vStat = () => sendJ({ type: 'vstat', p: per });
 function vDraw() {

@@ -1,6 +1,6 @@
 name: "Голос"
 slug: "voice"
-version: "0.3.0"
+version: "0.3.1"
 description: "Голосовой ассистент на айфоне"
 arch:
   - "amd64"

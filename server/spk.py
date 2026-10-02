@@ -5,7 +5,7 @@ import numpy as np
 from aiohttp import web
 
 MODEL, VD = "/opt/voice/spk.onnx", "/data/voices/"
-PEOPLE = {"anatoly": "Анатолий", "zhenya": "Женя", "leya": "Лея"}
+PEOPLE = {"anatoly": "Анатолий", "evgeniya": "Евгения", "leya": "Лея"}
 UNK = "Неизвестно"
 OPT = {"threshold": 0.45, "margin": 0.08}
 try:
@@ -111,6 +111,13 @@ def identify(pcm):
 
 
 def warm():
+    old, new = VD + "zhenya", VD + "evgeniya"  # 0.3.1: «Женя» -> «Евгения»
+    if os.path.isdir(old) and not os.path.exists(new):
+        try:
+            os.rename(old, new)
+            print("[voice] voices: zhenya -> evgeniya")
+        except OSError as e:
+            print("[voice] voices rename:", e)
     for p in PEOPLE:
         try:
             recalc(p)
