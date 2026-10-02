@@ -8,7 +8,7 @@
   `ws`, `cert.crt`, `api/health`, `api/recordings`, `api/recordings/last.wav`,
   `api/voices/<id>/last.wav`; фразы в `/data/recordings`, последние 20.
 - `server/spk.py` — опознание: CAM++ (3D-Speaker, sherpa-onnx) `/opt/voice/spk.onnx`,
-  fbank 80 на numpy + CMN, onnxruntime из apk (Alpine 3.21). Образцы
+  fbank 80 на numpy + CMN, onnxruntime из apk (Alpine 3.23; в 3.21 пакета `py3-onnxruntime` нет). Образцы
   `/data/voices/<anatoly|evgeniya|leya>/NNN.wav|.npy`, центроид `c.npy`; лог `log.jsonl` (200).
   Порог `threshold` и отрыв `margin` — options. Хэш модели — `spk.sha256`.
 - Имена = варианты `input_select.kto_govorit`: Неизвестно, Анатолий, Евгения, Лея.
@@ -36,6 +36,15 @@
   сборка печатает строку `VOICE spk.sha256 не заполнен; модель: <хэш>`: впиши этот хэш
   в `spk.sha256` следующей версией.
 - Нельзя коммитить заглушки в файлы, которые проверяются при сборке. Перед выпуском
-  собери образ вручную: `docker build --build-arg BUILD_FROM=ghcr.io/home-assistant/amd64-base:3.21
+  собери образ вручную: `docker build --build-arg BUILD_FROM=ghcr.io/home-assistant/amd64-base:3.23
   -t local/voice-test /addons/voice`, потом `docker rmi local/voice-test`. Если в сессии
   моста нет docker и сети, напиши об этом в отчёте.
+
+## Урок: сборка 0.3.1
+- 0.3.1 тоже не собрался: база `amd64-base:3.21`, а `py3-onnxruntime` в Alpine есть только
+  с 3.23 (`apk add` -> «no such package»). База поднята до 3.23 (onnxruntime 1.23.0).
+  Хэш модели вписан в `spk.sha256` (размер 28281164 совпадает с ассетом релиза).
+- Ручная сборка «как Supervisor»: buildx есть только в `docker:<версия>-cli`, контекст —
+  через tar: `tar -C /addons/voice --exclude=.git -cf - . | docker run --rm -i
+  -v /var/run/docker.sock:/var/run/docker.sock docker:29.6.2-cli docker buildx build -
+  --tag local/voice-test --platform linux/amd64 --pull --progress=plain`.

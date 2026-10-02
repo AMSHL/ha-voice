@@ -1,4 +1,4 @@
-ARG BUILD_FROM=ghcr.io/home-assistant/amd64-base:3.21
+ARG BUILD_FROM=ghcr.io/home-assistant/amd64-base:3.23
 FROM ${BUILD_FROM}
 ENV PYTHONUNBUFFERED=1
 RUN apk add --no-cache python3 py3-aiohttp py3-pip py3-numpy py3-onnxruntime openssl curl \
