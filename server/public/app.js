@@ -58,6 +58,7 @@ function tts(buf) { // int16 chunk of the answer, format from the last 'tts' mes
   playT = Math.max(playT, ctx.currentTime + 0.1); s.start(playT); playT += b.duration;
 }
 function onMsg(m) {
+  if (m.type[0] === 'v' || m.type === 'who') return vMsg(m);
   if (m.type === 'nosat') flash('Home Assistant не подключён к спутнику ' + m.room, 1);
   if (m.type === 'sent') { clearTimeout(stT); status('Распознаю…'); stT = setTimeout(idle, 15000); set('heard', '…'); set('answer', '…'); }
   if (m.type === 'heard') set('heard', m.text || '(ничего не распознано)');
@@ -163,7 +164,7 @@ function sayUi(s) {
 }
 function goLive(p) {
   p.live = true; p.t = performance.now();
-  sendJ({ type: 'start', room });
+  sendJ({ type: 'start', room, ...vmode() });
   sayUi('talk'); if (!p.out) idle();
 }
 say.oncontextmenu = e => e.preventDefault();
@@ -237,3 +238,43 @@ $('play').onclick = () => {
 
 set('dSec', isSecureContext ? 'да' : 'нет — микрофона не будет');
 drawRooms(); loadRec(); connect();
+
+// 0.3 "Голоса" tab: the same push-to-talk records a sample of the chosen person or checks who is speaking.
+const PH = ['Включи свет на кухне', 'Какая завтра погода?', 'Поставь будильник на семь утра',
+  'Выключи телевизор в гостиной', 'Сделай потеплее в спальне', 'Открой шторы', 'Сколько сейчас времени?',
+  'Напомни купить хлеб и молоко', 'Включи музыку потише', 'Закрой ворота', 'Мы идём гулять с собакой',
+  'Шла Саша по шоссе и сосала сушку', 'Сегодня отличный солнечный день', 'В лесу родилась ёлочка',
+  'Позвони бабушке вечером', 'Почитай мне сказку', 'Какие новости на сегодня?',
+  'Выключи везде свет, мы спим', 'Раз, два, три, четыре, пять', 'Кондиционер на двадцать три градуса'];
+let tab = 'cmd', vm = 'rec', phi = Math.floor(Math.random() * PH.length), per = localStorage.getItem('voice.p');
+if (!['anatoly', 'zhenya', 'leya'].includes(per)) per = 'anatoly';
+const vmode = () => tab === 'vox' ? { v: vm, p: per } : {};
+const vStat = () => sendJ({ type: 'vstat', p: per });
+function vDraw() {
+  document.body.classList.toggle('vox', tab === 'vox');
+  for (const [id, k, v] of [['tabs', 't', tab], ['ppl', 'p', per], ['vmode', 'v', vm]])
+    for (const b of $(id).children) b.classList.toggle('on', b.dataset[k] === v);
+  set('phrase', vm === 'rec' ? '«' + PH[phi % PH.length] + '»' : 'Скажите что угодно — проверю, кто это');
+}
+const pick = (id, k, f) => { $(id).onclick = e => { const x = e.target.dataset[k]; if (x) { f(x); vDraw(); } }; };
+pick('tabs', 't', x => { tab = x; vStat(); });
+pick('ppl', 'p', x => { per = x; localStorage.setItem('voice.p', x); set('vcnt', '…'); vStat(); });
+pick('vmode', 'v', x => { vm = x; });
+$('vdel').onclick = () => confirm('Удалить последний образец?') && sendJ({ type: 'vdel', p: per });
+$('vdelall').onclick = () => confirm('Удалить ВСЕ образцы этого человека?') && sendJ({ type: 'vdelall', p: per });
+$('vplay').onclick = () => {
+  const a = $('vaudio');
+  a.src = 'api/voices/' + per + '/last.wav?t=' + Date.now(); a.play().catch(() => flash('Образцов нет', 1));
+};
+function vMsg(m) {
+  if (m.type === 'who') set('who', m.who + (m.pct ? ' (' + m.pct + ' %)' : '') + (m.err ? ' · ' + m.err : ''));
+  if (m.type === 'vstat' && m.p === per) set('vcnt', 'Записано ' + m.n + ' из 15–20');
+  if (m.type === 'vstat' && m.ok) { phi++; vDraw(); flash('Образец сохранён'); }
+  if (m.type === 'vshort') flash('Тихо или мало речи (' + m.sec + ' с) — прочитайте фразу целиком', 1);
+  if (m.type === 'vcheck') {
+    flash('Говорит: ' + m.who + (m.pct ? ' (' + m.pct + ' %)' : ''));
+    set('vres', Object.entries(m.sims).map(([k, v]) => k + ': ' + v.toFixed(2)).join(' · ') + ' · ' + m.ms + ' мс');
+  }
+  if (m.type === 'verr') flash('Ошибка: ' + m.text, 1);
+}
+vDraw();

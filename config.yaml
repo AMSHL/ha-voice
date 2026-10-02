@@ -1,10 +1,11 @@
 name: "Голос"
 slug: "voice"
-version: "0.2.1"
+version: "0.3.0"
 description: "Голосовой ассистент на айфоне"
 arch:
   - "amd64"
 init: false
+homeassistant_api: true
 ingress: true
 ingress_port: 8099
 panel_icon: "mdi:microphone-message"
@@ -21,5 +22,9 @@ ports_description:
   10702/tcp: "Wyoming-спутник: Детская"
 options:
   host_ip: "192.168.1.123"
+  threshold: 0.45
+  margin: 0.08
 schema:
   host_ip: "str"
+  threshold: "float(0,1)"
+  margin: "float(0,1)"

@@ -3,8 +3,9 @@ import array, asyncio, json, math, os, ssl, time, wave
 from aiohttp import WSMsgType, web
 from wyoming.event import Event, async_read_event, async_write_event
 from wyoming.info import Attribution, Info, Satellite
+import spk
 
-VERSION = "0.2.1"
+VERSION = "0.3.0"
 PUB = os.path.dirname(os.path.abspath(__file__)) + "/public/"
 REC, TLS = "/data/recordings/", "/data/tls/"
 ROOMS = {"bedroom": ("Спальня", 10700), "living": ("Гостиная", 10701), "kids": ("Детская", 10702)}
@@ -183,7 +184,9 @@ async def ws_loop(ws):
         elif t == "ping":
             await send({"type": "pong", "t": d.get("t"), "sat": SATS[room].ha is not None})
         elif t == "start":
-            ptt = bytearray()
+            ptt, vm = bytearray(), d
+        elif t in ("vstat", "vdel", "vdelall"):
+            await send(await spk.manage(t, d.get("p")))
         elif t == "cancel":
             ptt = None
         elif t == "end" and ptt is not None:
@@ -192,10 +195,14 @@ async def ws_loop(ws):
             if sec < MIN_SEC:
                 await send({"type": "short", "sec": sec})
                 continue
+            if vm.get("v") in ("rec", "check"):
+                await send(await spk.voice_cmd(vm["v"], vm.get("p"), pcm))
+                continue
             name = await asyncio.get_running_loop().run_in_executor(None, save, room, pcm)
             print("[voice] saved", name, sec)
             await send({"type": "saved", "name": name, "sec": sec})
             sat = SATS[room]
+            await send(await spk.before(sat.name, pcm))
             if sat.ha is None:
                 await send({"type": "nosat", "room": sat.name})
                 continue
@@ -211,7 +218,7 @@ async def main():
     app = web.Application()
     for path, h in (("/", index), ("/index.html", index), ("/ws", ws_handler), ("/cert.crt", cert),
                     ("/api/health", api_health), ("/api/recordings", api_recs),
-                    ("/api/recordings/last.wav", api_last), ("/{name}", static)):
+                    ("/api/recordings/last.wav", api_last), ("/api/voices/{p}/last.wav", spk.last_wav), ("/{name}", static)):
         app.router.add_get(path, h)
     runner = web.AppRunner(app)
     await runner.setup()
@@ -221,6 +228,7 @@ async def main():
     await web.TCPSite(runner, "0.0.0.0", 8091, ssl_context=ctx).start()
     for s in SATS.values():
         await asyncio.start_server(s.serve, "0.0.0.0", s.port)
+    await asyncio.get_running_loop().run_in_executor(None, spk.warm)
     print("[voice] v" + VERSION, "ingress 8099, https 8091, wyoming 10700-10702")
     await asyncio.Event().wait()
 

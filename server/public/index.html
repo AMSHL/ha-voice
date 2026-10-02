@@ -14,9 +14,11 @@ main{max-width:520px;margin:auto;display:grid;grid-template-columns:minmax(0,1fr
 .row{display:flex;gap:8px;align-items:center;justify-content:space-between}
 .row>*{min-width:0}
 button{font:inherit;color:var(--t);border:1px solid var(--l);background:#fff9;border-radius:14px;padding:12px}
-#rooms{padding:8px;gap:6px}
-#rooms button{flex:1 1 0;min-width:0;padding:10px 2px;font-size:15px;overflow-wrap:anywhere}
-#rooms .on{background:var(--t);color:var(--c)}
+#rooms,#tabs{padding:8px;gap:6px}
+#rooms button,#tabs button,.vox .row button{flex:1 1 0;min-width:0;padding:10px 2px;font-size:15px;overflow-wrap:anywhere}
+body.vox .cmd,body:not(.vox) .vox{display:none}
+#phrase{font-size:20px;margin:6px 0}
+.on{background:var(--t);color:var(--c)}
 #status{font-size:20px;font-weight:600}
 .err{color:#A8432F}
 .meter{height:12px;border-radius:6px;background:#EDE5D8;margin:10px 0 6px}
@@ -35,12 +37,15 @@ dt,.m{color:var(--m)}dd{margin:0;text-align:right;overflow-wrap:anywhere}
 audio{width:100%}
 </style></head><body><main>
 <div class="row"><h2>Голос</h2><span class="m" id="ver"></span></div>
-<div class="card row" id="rooms"><button data-r="bedroom">Спальня</button><button data-r="living">Гостиная</button><button data-r="kids">Детская</button></div>
+<div class="card row" id="tabs"><button data-t="cmd">Команды</button><button data-t="vox">Голоса</button></div>
+<div class="card vox"><div class="row" id="ppl"><button data-p="anatoly">Анатолий</button><button data-p="zhenya">Женя</button><button data-p="leya">Лея</button></div><div class="row" id="vmode" style="margin-top:8px"><button data-v="rec">Запись образцов</button><button data-v="check">Проверить</button></div></div>
+<div class="card row cmd" id="rooms"><button data-r="bedroom">Спальня</button><button data-r="living">Гостиная</button><button data-r="kids">Детская</button></div>
 <div class="card"><div id="status">Ожидание</div><div class="meter"><i id="lvl"></i></div>
 <div class="row m"><span>Микрофон: <b id="lvlMic">выключен</b></span><span>Сервер слышит: <b id="lvlSrv">—</b></span></div></div>
 <div class="row"><button class="big" id="listen">Слушать<small>выключено</small></button><button class="big" id="say">Сказать<small>держите и говорите</small></button></div>
-<div class="card"><div class="m">Вы сказали</div><div id="heard">—</div><div class="m">Ответ</div><div id="answer">—</div></div>
-<div class="card"><div class="row"><b>Последняя запись</b><button id="play">Прослушать</button></div>
+<div class="card vox"><div class="m">Держите «Сказать» и прочитайте</div><div id="phrase">—</div><div class="m" id="vcnt">—</div><div class="m" id="vres"></div><div class="row" style="margin-top:8px"><button id="vplay">Прослушать</button><button id="vdel">Удалить последний</button><button id="vdelall">Удалить все</button></div><audio id="vaudio" hidden></audio></div>
+<div class="card cmd"><div class="m">Говорит</div><div id="who">—</div><div class="m">Вы сказали</div><div id="heard">—</div><div class="m">Ответ</div><div id="answer">—</div></div>
+<div class="card cmd"><div class="row"><b>Последняя запись</b><button id="play">Прослушать</button></div>
 <div class="m" id="recinfo">—</div><audio id="audio" controls hidden></audio></div>
 <div class="card"><b>Диагностика</b><dl>
 <dt>Защищённый контекст</dt><dd id="dSec"></dd><dt>Микрофон</dt><dd id="dMic">выключен</dd>
