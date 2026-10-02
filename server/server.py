@@ -5,7 +5,7 @@ from wyoming.event import Event, async_read_event, async_write_event
 from wyoming.info import Attribution, Info, Satellite
 import spk
 
-VERSION = "0.4.2"
+VERSION = "0.4.3"
 PUB = os.path.dirname(os.path.abspath(__file__)) + "/public/"
 REC, TLS = "/data/recordings/", "/data/tls/"
 ROOMS = {"bedroom": ("Спальня", 10700), "living": ("Гостиная", 10701), "kids": ("Детская", 10702)}
@@ -15,6 +15,8 @@ NC = {"Cache-Control": "no-store"}
 CIDS, RUNS = itertools.count(1), itertools.count(1)  # 0.4.2: ids of HA connections and of runs, for the log
 FLOW = {"transcribe", "voice-started", "voice-stopped", "transcript", "synthesize", "handled",
         "not-handled", "audio-start", "audio-stop", "error"}  # events of an asr -> tts run
+NOHA = "Home Assistant не ответил, попробуйте ещё раз"  # 0.4.3: watchdog texts for the page
+NOANS = "Ассистент не ответил"
 
 
 class Sat:
